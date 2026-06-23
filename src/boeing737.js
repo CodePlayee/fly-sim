@@ -133,8 +133,9 @@ function makeSweptWing(span, rootChord, tipChord, mat, ctrlMat, opt = {}) {
   shape.lineTo(tipTEx, span);
   shape.lineTo(tipTEx + tipChord, span);
   shape.closePath();
-  const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.28, bevelEnabled: false });
-  geo.translate(0, 0, -0.14);
+  const WING_TH = 0.3; // 翼面厚度（操纵面与之一致以贴合）
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: WING_TH, bevelEnabled: false });
+  geo.translate(0, 0, -WING_TH / 2);
   g.add(new THREE.Mesh(geo, mat));
 
   if (opt.winglet) {
@@ -157,18 +158,19 @@ function makeSweptWing(span, rootChord, tipChord, mat, ctrlMat, opt = {}) {
 
     aileron = new THREE.Group();
     aileron.position.set(hingeX, ymid, 0); // 铰链贴合后缘
-    // 舵面做成贴合后缘的梯形薄板：用 ExtrudeGeometry 与翼后缘斜度匹配，避免悬空
+    // 舵面做成贴合后缘的梯形薄板：与翼面同厚，前缘略向前(+X)插入翼后缘 0.15m 消除接缝
     const slope = (teAt(y2) - teAt(y1)) / surfSpan; // 后缘随展向的 x 斜率
+    const lap = 0.15; // 与翼面搭接量
     const sShape = new THREE.Shape();
     // 局部坐标：x=弦向(0=铰链,负=向后), y=展向(相对 ymid)
     const halfS = surfSpan / 2;
-    sShape.moveTo(slope * (-halfS), -halfS);
-    sShape.lineTo(slope * (halfS), halfS);
+    sShape.moveTo(slope * (-halfS) + lap, -halfS);
+    sShape.lineTo(slope * (halfS) + lap, halfS);
     sShape.lineTo(slope * (halfS) - chord, halfS);
     sShape.lineTo(slope * (-halfS) - chord, -halfS);
     sShape.closePath();
-    const sGeo = new THREE.ExtrudeGeometry(sShape, { depth: 0.16, bevelEnabled: false });
-    sGeo.translate(0, 0, -0.08);
+    const sGeo = new THREE.ExtrudeGeometry(sShape, { depth: WING_TH, bevelEnabled: false });
+    sGeo.translate(0, 0, -WING_TH / 2);
     const surf = new THREE.Mesh(sGeo, ctrlMat);
     aileron.add(surf);
     g.add(aileron);
@@ -208,45 +210,65 @@ function makeVerticalTail(accentMat, ctrlMat) {
   return { group: g, rudder };
 }
 
-/** 发动机短舱：外涵 + 黑唇口 + 可旋转风扇叶 + 尾喷管。返回 { group, fan } */
+/** 发动机短舱：进气唇口 + 风扇 + 修长外涵 + 收敛尾喷管 + 中心锥。返回 { group, fan } */
 function makeEngine(mat, darkMat, ctrlMat) {
   const g = new THREE.Group();
-  const L = 4.2, R = 1.0;
-  const nacelle = new THREE.Mesh(new THREE.CylinderGeometry(R, R * 0.9, L, 24), mat);
-  nacelle.rotation.z = Math.PI / 2;
-  g.add(nacelle);
+  const R = 1.05;
+  const L_INLET = 1.0;  // 进气段
+  const L_CORE = 3.0;   // 外涵主体
+  const L_NOZ = 1.3;    // 收敛尾喷段
 
-  const lip = new THREE.Mesh(new THREE.TorusGeometry(R, 0.18, 12, 24), darkMat);
-  lip.position.x = L / 2;
+  // 进气段：从唇口略收到最大直径
+  const inlet = new THREE.Mesh(
+    new THREE.CylinderGeometry(R * 0.96, R, L_INLET, 28), mat);
+  inlet.rotation.z = Math.PI / 2;
+  inlet.position.x = L_CORE / 2 + L_INLET / 2;
+  g.add(inlet);
+
+  // 外涵主体（等直径，修长）
+  const core = new THREE.Mesh(
+    new THREE.CylinderGeometry(R, R, L_CORE, 28), mat);
+  core.rotation.z = Math.PI / 2;
+  g.add(core);
+
+  // 收敛尾喷段：直径向后收小
+  const nozzle = new THREE.Mesh(
+    new THREE.CylinderGeometry(R * 0.62, R, L_NOZ, 28), mat);
+  nozzle.rotation.z = Math.PI / 2;
+  nozzle.position.x = -L_CORE / 2 - L_NOZ / 2;
+  g.add(nozzle);
+
+  // 进气唇口（暗色圆环）
+  const lip = new THREE.Mesh(new THREE.TorusGeometry(R * 0.97, 0.13, 12, 28), darkMat);
+  lip.position.x = L_CORE / 2 + L_INLET;
   g.add(lip);
 
-  // 风扇：暗色背盘 + 数片叶片（绕 X 旋转可见）
+  // 风扇：暗色背盘 + 叶片，置于进气口内
   const fan = new THREE.Group();
-  fan.position.x = L / 2 - 0.08;
-  const disk = new THREE.Mesh(new THREE.CircleGeometry(R * 0.86, 24), darkMat);
+  fan.position.x = L_CORE / 2 + L_INLET - 0.25;
+  const disk = new THREE.Mesh(new THREE.CircleGeometry(R * 0.88, 28), darkMat);
   disk.rotation.y = Math.PI / 2; // 面朝 +X
   fan.add(disk);
-  const bladeMat = ctrlMat;
-  const BLADES = 10;
+  const BLADES = 18;
   for (let k = 0; k < BLADES; k++) {
-    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.12, R * 0.78), bladeMat);
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.1, R * 0.8), ctrlMat);
     const ang = (k / BLADES) * Math.PI * 2;
-    // 叶片在 YZ 平面绕 X 轴分布
-    blade.position.set(0.02, Math.sin(ang) * R * 0.42, Math.cos(ang) * R * 0.42);
+    blade.position.set(0.02, Math.sin(ang) * R * 0.44, Math.cos(ang) * R * 0.44);
     blade.rotation.x = ang;
     fan.add(blade);
   }
-  // 旋转中心整流锥
-  const spinner = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.5, 12), darkMat);
+  // 旋转中心整流锥（朝前）
+  const spinner = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.55, 16), darkMat);
   spinner.rotation.z = -Math.PI / 2;
-  spinner.position.x = 0.2;
+  spinner.position.x = 0.28;
   fan.add(spinner);
   g.add(fan);
 
-  const exhaust = new THREE.Mesh(new THREE.ConeGeometry(R * 0.55, 1.4, 20), darkMat);
-  exhaust.rotation.z = -Math.PI / 2;
-  exhaust.position.x = -L / 2 - 0.5;
-  g.add(exhaust);
+  // 尾喷中心锥（藏在收敛段内，仅微露）
+  const plug = new THREE.Mesh(new THREE.ConeGeometry(R * 0.5, 1.0, 20), darkMat);
+  plug.rotation.z = -Math.PI / 2;
+  plug.position.x = -L_CORE / 2 - L_NOZ + 0.2;
+  g.add(plug);
 
   return { group: g, fan };
 }
