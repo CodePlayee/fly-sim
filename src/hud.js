@@ -96,6 +96,28 @@ export function setupHud(api, airports) {
   help.innerHTML = '↑↓ 俯仰 · ←→ 滚转 · W/S 油门 · A/D 方向舵 · V 视角';
   ctrl.appendChild(help);
 
+  // 航班横幅（顶部居中）：出发 -> 目的地
+  const flightBar = document.createElement('div');
+  flightBar.style.cssText = `
+    position:absolute; left:50%; top:10px; transform:translateX(-50%);
+    padding:6px 18px; border-radius:20px; font-size:13px; display:none;
+    background:rgba(8,18,32,.6); border:1px solid rgba(120,180,255,.3);
+    backdrop-filter:blur(4px); white-space:nowrap; z-index:10;`;
+  wrap.appendChild(flightBar);
+
+  function setFlight(depIcao, dest) {
+    if (!dest) { flightBar.style.display = 'none'; return; }
+    flightBar.style.display = 'block';
+    const lead = (dest.airlines && dest.airlines[0])
+      ? (dest.airlines[0].name || dest.airlines[0].code) : '';
+    flightBar.innerHTML = `
+      <b>${depIcao}</b>
+      <span style="color:#5a9ae8;margin:0 8px;">✈──→</span>
+      <b style="color:#9fd0ff;">${dest.iata || dest.icao}</b>
+      <span style="opacity:.8;">${dest.city || dest.name || ''}</span>
+      ${lead ? `<span style="opacity:.55;margin-left:8px;">· ${lead}</span>` : ''}`;
+  }
+
   function update() {
     const s = api.getState();
     panel.innerHTML = `
@@ -156,5 +178,5 @@ export function setupHud(api, airports) {
     nightOverlay.style.opacity = String(Math.max(0, Math.min(0.6, op)));
   }
 
-  return { update, setNightOverlay, setGPWS };
+  return { update, setNightOverlay, setGPWS, setFlight };
 }

@@ -37,6 +37,8 @@ await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
 // 等待 flySim API 就绪
 await page.waitForFunction(() => window.flySim && window.flySim.getState().ready, { timeout: 60000 });
+// 关闭起始航班选择界面（截图脚本通过 API 驱动，不走 UI 选择）
+await page.evaluate(() => { const o = document.getElementById('flight-select'); if (o) o.remove(); });
 // 再等地形/影像瓦片首次加载
 await page.waitForFunction(() => window.flySim.map.areTilesLoaded(), { timeout: 60000 }).catch(() => {});
 console.log('flySim 就绪，开始截图。');

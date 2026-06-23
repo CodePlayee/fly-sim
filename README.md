@@ -42,6 +42,20 @@ npm run shot     # 生成 shots/*.png 截图验证
 - **KSFO** 旧金山国际机场（海湾 + 背景山脉）
 - **LFPG** 巴黎戴高乐机场（平原）
 
+## 航班计划与自动导航
+
+初始进入显示**航班选择界面**：选出发机场 → 选目的地航线 → 「开始飞行」，
+小地图随即自动导航到所选目的地（品红虚线航线 + 方位/距离）。
+
+航线为**真实公开数据**（[OpenFlights](https://github.com/jpatokal/openflights)
+数据集，约 6.6 万条真实航段），每个出发机场列出真实通航的目的地、距离与
+**实际运营航司**（如 香港→曼谷：国泰 / 阿联酋 / 阿提哈德…）。支持按城市 /
+国家 / IATA 代码搜索。
+
+数据通过 `scripts/build_routes.mjs` 离线抽取、关联机场坐标与航司名称，
+生成 `src/routes.js` 打包进项目，**运行时无需联网**（契合本项目无 token 原则）。
+重新生成：`node scripts/build_routes.mjs`。
+
 ## 光照说明
 
 SunCalc 按机场真实经纬度 + 时刻计算太阳/月亮的方位角与高度角，驱动：
@@ -59,14 +73,18 @@ src/
   scene.js         # MapLibre 地图样式：DEM 地形 + 卫星影像 + 山体阴影
   lighting.js      # SunCalc 太阳/月亮 -> 天空/雾/光照
   airports.js      # 3 个机场预设
+  routes.js        # 真实航班航线数据（OpenFlights 离线生成，勿手改）
+  flightSelect.js  # 起始航班选择界面（出发机场 + 目的地航线 + 自动导航）
   aircraft.js      # 6-DOF-lite 飞行动力学（点质量+姿态，带攻角升力曲线）
   gpws.js          # 近地警告系统（沿预测航迹采样地形）
   boeing737.js     # 程序化生成的波音 737 模型（纯 Three.js 几何体）
   aircraftLayer.js # 透明 Three.js 画布叠层，渲染 737 于地图前景
-  hud.js           # HUD、夜间叠层、控制 UI
-  minimap.js       # 右下角导航小地图（ND，北朝上，航迹/机场/航向）
+  hud.js           # HUD、夜间叠层、航班横幅、控制 UI
+  minimap.js       # 右下角导航小地图（ND，北朝上，航迹/机场/航向/航班目的地）
 scripts/
+  build_routes.mjs # 从 OpenFlights 公开数据离线生成 routes.js
   screenshot.mjs   # Puppeteer 截图验证
+  inspect_model.*  # 737 模型多视角隔离检视
 ```
 
 ## 飞机模型

@@ -61,11 +61,13 @@ export function setupMinimap(airports) {
 
   // 自定义航点（点击设定）；为 null 时目标=最近的其它机场
   let manualWaypoint = null;
+  // 航班计划目的地（由起始选择界面设定）：{icao,iata,name,city,lon,lat}
+  let flightDest = null;
   // 保存最近一帧的投影参数，供点击反投影使用
   let lastProj = null;
 
-  // 自动量程（公里）档位
-  const RANGES = [1, 2, 5, 10, 20, 40, 80, 160, 320, 640, 1280, 2560, 5120, 10240];
+  // 自动量程（公里）档位（扩到洲际 ~13000km）
+  const RANGES = [1, 2, 5, 10, 20, 40, 80, 160, 320, 640, 1280, 2560, 5120, 10240, 13000];
 
   // ---- 交互：点击设航点，双击清除 ----
   function pixelToLonLat(clientX, clientY) {
@@ -89,10 +91,16 @@ export function setupMinimap(airports) {
     manualWaypoint = null; // 清除自定义航点，回到默认目标机场
   });
 
-  /** 计算目标（自定义航点优先；否则最近的其它机场） */
+  /** 计算目标：自定义航点 > 航班计划目的地 > 最近的其它机场 */
   function resolveTarget(state, currentIcao, kmPerDegLon, kmPerDegLat) {
     if (manualWaypoint) {
       return { name: 'WPT', lon: manualWaypoint.lon, lat: manualWaypoint.lat, custom: true };
+    }
+    if (flightDest) {
+      return {
+        name: flightDest.iata || flightDest.icao || '目的地',
+        lon: flightDest.lon, lat: flightDest.lat, custom: false,
+      };
     }
     let best = null;
     let bestD = Infinity;
@@ -308,5 +316,11 @@ export function setupMinimap(airports) {
     manualWaypoint = null;
   }
 
-  return { update, reset };
+  /** 设定航班计划目的地（起始选择界面）。dest={icao,iata,name,city,lon,lat} 或 null 清除 */
+  function setFlightPlan(dest) {
+    flightDest = dest || null;
+    manualWaypoint = null; // 新航班覆盖手动航点
+  }
+
+  return { update, reset, setFlightPlan };
 }

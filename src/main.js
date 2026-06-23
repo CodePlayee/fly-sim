@@ -7,8 +7,10 @@ import { setupHud } from './hud.js';
 import { createAircraftOverlay } from './aircraftLayer.js';
 import { createGPWS } from './gpws.js';
 import { setupMinimap } from './minimap.js';
+import { setupFlightSelect } from './flightSelect.js';
 
 let currentAirport = AIRPORTS[DEFAULT_AIRPORT];
+let currentFlight = null; // { depIcao, dest } 由起始选择界面设定
 const aircraft = new Aircraft(currentAirport);
 
 const map = await createMap('map', currentAirport);
@@ -125,11 +127,20 @@ function goToAirport(icao) {
   refreshLighting();
 }
 
+// ---- 起飞航班计划：跳转出发机场并设定小地图导航目的地 ----
+function startFlight({ depIcao, dest }) {
+  goToAirport(depIcao);
+  currentFlight = { depIcao, dest };
+  minimap.setFlightPlan(dest); // dest 含 lon/lat/iata 等
+  hud.setFlight && hud.setFlight(depIcao, dest);
+}
+
 // ---- 对外 API（供 HUD / 截图脚本）----
 window.flySim = {
   map,
   aircraft,
   goToAirport,
+  startFlight,
   setLocalHour: (h) => {
     manualLocalHour = h;
     refreshLighting();
@@ -170,6 +181,11 @@ const hud = setupHud(window.flySim, AIRPORTS);
 
 // ---- 右下角导航小地图（ND）----
 const minimap = setupMinimap(AIRPORTS);
+
+// ---- 起始航班选择界面（全屏覆盖层）----
+const flightSelect = setupFlightSelect(AIRPORTS, (plan) => {
+  startFlight(plan);
+});
 
 // ---- 近地警告系统（GPWS）----
 const gpws = createGPWS(map, () => aircraft.state());
