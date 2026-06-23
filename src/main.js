@@ -5,6 +5,7 @@ import { AIRPORTS, DEFAULT_AIRPORT } from './airports.js';
 import { Aircraft } from './aircraft.js';
 import { setupHud } from './hud.js';
 import { createAircraftOverlay } from './aircraftLayer.js';
+import { createGPWS } from './gpws.js';
 
 let currentAirport = AIRPORTS[DEFAULT_AIRPORT];
 const aircraft = new Aircraft(currentAirport);
@@ -145,6 +146,12 @@ window.flySim = {
 
 const hud = setupHud(window.flySim, AIRPORTS);
 
+// ---- 近地警告系统（GPWS）----
+const gpws = createGPWS(map, () => aircraft.state());
+let gpwsInfo = { level: 'none', aglHere: Infinity };
+let lastGpwsEval = 0;
+window.flySim.getGPWS = () => gpwsInfo;
+
 // ---- 主循环 ----
 let last = performance.now();
 function frame() {
@@ -160,7 +167,14 @@ function frame() {
 
   updateCamera();
   aircraftOverlay.render();
+
+  // GPWS 评估（约每 250ms 一次，地形查询有开销），闪烁每帧更新
+  if (now - lastGpwsEval > 250) {
+    gpwsInfo = gpws.evaluate();
+    lastGpwsEval = now;
+  }
   hud.update();
+  hud.setGPWS(gpwsInfo, now); // 须在 update 之后，避免 AGL 读数被重建覆盖
   requestAnimationFrame(frame);
 }
 

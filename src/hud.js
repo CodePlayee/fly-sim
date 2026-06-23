@@ -15,6 +15,22 @@ export function setupHud(api, airports) {
     background:#02030a; opacity:0; transition:opacity 1.5s;`;
   document.body.appendChild(nightOverlay);
 
+  // 近地警告：屏幕红/黄边框闪烁 + 中央横幅
+  const gpwsEdge = document.createElement('div');
+  gpwsEdge.style.cssText = `
+    position:absolute; inset:0; pointer-events:none; z-index:7;
+    box-shadow:inset 0 0 0 0 rgba(0,0,0,0); transition:box-shadow .15s;`;
+  document.body.appendChild(gpwsEdge);
+
+  const gpwsBanner = document.createElement('div');
+  gpwsBanner.style.cssText = `
+    position:absolute; left:50%; top:22%;
+    transform:translateX(-50%); pointer-events:none; z-index:11;
+    padding:8px 22px; border-radius:6px; font-weight:800; letter-spacing:2px;
+    font-size:26px; display:none; text-align:center;
+    font-family:"Arial Black",Arial,sans-serif;`;
+  document.body.appendChild(gpwsBanner);
+
   // 仪表盘
   const panel = document.createElement('div');
   panel.style.cssText = `
@@ -87,7 +103,47 @@ export function setupHud(api, airports) {
       <div>空速 &nbsp;<b>${s.speedKt}</b> kt</div>
       <div>高度 &nbsp;<b>${s.alt}</b> m</div>
       <div>航向 &nbsp;<b>${String(s.headingDeg).padStart(3,'0')}</b>°</div>
+      <div>离地 &nbsp;<b id="hud-agl">--</b> m</div>
       <div>状态 &nbsp;<b>${s.onGround ? '地面' : '空中'}</b></div>`;
+  }
+
+  // 近地警告状态显示（含闪烁）
+  let blinkOn = false;
+  let lastBlink = 0;
+  function setGPWS(info, nowMs) {
+    const aglEl = document.getElementById('hud-agl');
+    if (aglEl && info && isFinite(info.aglHere)) {
+      aglEl.textContent = Math.max(0, Math.round(info.aglHere));
+      aglEl.style.color =
+        info.level === 'warning' ? '#ff5252' :
+        info.level === 'caution' ? '#ffd24a' : '#cfe8ff';
+    }
+
+    const level = info ? info.level : 'none';
+    if (level === 'none') {
+      gpwsEdge.style.boxShadow = 'inset 0 0 0 0 rgba(0,0,0,0)';
+      gpwsBanner.style.display = 'none';
+      return;
+    }
+
+    // 警告闪烁频率：warning 更快
+    const period = level === 'warning' ? 350 : 650;
+    if (nowMs - lastBlink > period) {
+      blinkOn = !blinkOn;
+      lastBlink = nowMs;
+    }
+
+    const color = level === 'warning' ? '255,60,60' : '255,200,60';
+    gpwsEdge.style.boxShadow = blinkOn
+      ? `inset 0 0 60px 14px rgba(${color},0.85)`
+      : `inset 0 0 30px 6px rgba(${color},0.35)`;
+
+    gpwsBanner.style.display = 'block';
+    gpwsBanner.textContent = info.text + (level === 'warning' ? ' ▲' : '');
+    gpwsBanner.style.background = level === 'warning' ? 'rgba(180,0,0,0.92)' : 'rgba(150,110,0,0.9)';
+    gpwsBanner.style.color = level === 'warning' ? '#fff' : '#fff7d6';
+    gpwsBanner.style.border = `2px solid rgba(${color},1)`;
+    gpwsBanner.style.opacity = blinkOn ? '1' : '0.55';
   }
 
   // 根据太阳高度角设置夜间压暗强度
@@ -99,5 +155,5 @@ export function setupHud(api, airports) {
     nightOverlay.style.opacity = String(Math.max(0, Math.min(0.6, op)));
   }
 
-  return { update, setNightOverlay };
+  return { update, setNightOverlay, setGPWS };
 }

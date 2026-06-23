@@ -1,0 +1,103 @@
+import maplibregl from 'maplibre-gl';
+
+/**
+ * 近地警告系统（GPWS / Ground Proximity Warning System）。
+ *
+ * 原理：从飞机当前位置出发，沿预测航迹（按当前航向、地速、垂直速度外推）
+ * 采样若干点，用 map.queryTerrainElevation 取该点地形高度，
+ * 计算预测航迹相对地形的最小离地余量(AGL)与"撞地剩余时间"，分级告警。
+ *
+ * 告警分级（参考真实 GPWS 模式）：
+ *   none    安全
+ *   caution "TERRAIN AHEAD" —— 预测路径将接近地形（黄色）
+ *   warning "PULL UP"       —— 预测路径将在很短时间内撞地（红色）
+ */
+
+const DEG = Math.PI / 180;
+const R = 6378137;
+
+export function createGPWS(map, getAircraftState) {
+  // 预测参数
+  const HORIZON_S = 30;     // 向前预测的时间(秒)
+  const STEP_S = 1.0;       // 采样步长(秒)
+  const CAUTION_AGL = 150;  // 低于此离地高度(米) -> 黄色警戒
+  const WARN_AGL = 60;      // 低于此离地高度(米) -> 红色警告
+  const WARN_TTI = 12;      // 预测撞地剩余时间(秒)低于此 -> 红色
+  const CAUTION_TTI = 22;
+
+  let last = { level: 'none', minAgl: Infinity, timeToImpact: Infinity, text: '' };
+
+  function evaluate() {
+    const s = getAircraftState();
+    if (!s || s.onGround) {
+      last = { level: 'none', minAgl: Infinity, timeToImpact: Infinity, text: '' };
+      return last;
+    }
+
+    const hdg = s.headingRad != null ? s.headingRad : (s.headingDeg || 0) * DEG;
+    const groundSpeed = (s.speedKt || 0) / 1.94384; // m/s
+    const vSpeed = s.vSpeedMs || 0;
+
+    let lon = s.lon;
+    let lat = s.lat;
+    let alt = s.alt;
+
+    let minAgl = Infinity;
+    let timeToImpact = Infinity;
+
+    // 飞机当前正下方离地（即时 AGL）
+    const elevHere = sampleTerrain(map, s.lon, s.lat);
+    const aglHere = alt - elevHere;
+    minAgl = aglHere;
+
+    // 沿预测航迹外推
+    const cosLat = Math.cos(lat * DEG);
+    for (let t = STEP_S; t <= HORIZON_S; t += STEP_S) {
+      // 水平推进
+      const horiz = groundSpeed * STEP_S;
+      const dLat = (horiz * Math.cos(hdg)) / R;
+      const dLon = (horiz * Math.sin(hdg)) / (R * cosLat);
+      lat += dLat / DEG;
+      lon += dLon / DEG;
+      // 垂直推进（假定当前垂直速度延续；预测保守起见不假设拉起）
+      alt += vSpeed * STEP_S;
+
+      const elev = sampleTerrain(map, lon, lat);
+      if (elev == null) continue;
+      const agl = alt - elev;
+      if (agl < minAgl) minAgl = agl;
+
+      // 预测撞地：航迹高度低于地形
+      if (agl <= 0 && timeToImpact === Infinity) {
+        timeToImpact = t;
+        break;
+      }
+    }
+
+    // 分级
+    let level = 'none';
+    let text = '';
+    if (timeToImpact <= WARN_TTI || minAgl <= WARN_AGL) {
+      level = 'warning';
+      text = 'PULL UP';
+    } else if (timeToImpact <= CAUTION_TTI || minAgl <= CAUTION_AGL) {
+      level = 'caution';
+      text = 'TERRAIN AHEAD';
+    }
+
+    last = { level, minAgl, timeToImpact, text, aglHere };
+    return last;
+  }
+
+  return { evaluate, getLast: () => last };
+}
+
+/** 查询某经纬度的地形高程（米）。无地形数据时返回 0。 */
+function sampleTerrain(map, lon, lat) {
+  try {
+    const e = map.queryTerrainElevation([lon, lat], { exaggerated: false });
+    return typeof e === 'number' && isFinite(e) ? e : 0;
+  } catch {
+    return 0;
+  }
+}

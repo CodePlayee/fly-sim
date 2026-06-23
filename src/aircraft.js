@@ -23,6 +23,7 @@ export class Aircraft {
     this.speed = 0;
     this.throttle = 0;
     this.onGround = true;
+    this.vSpeed = 0;
   }
 
   update(dt) {
@@ -65,6 +66,7 @@ export class Aircraft {
       const sink = (1 - clamp(this.speed / rotateSpeed, 0, 1)) * 8; // 失速下沉
       vSpeed = lift - sink;
     }
+    this.vSpeed = vSpeed; // m/s，暴露给近地警告预测
 
     // 水平位移（沿大圆近似）
     const horiz = this.speed * Math.cos(this.pitch) * dt;
@@ -97,6 +99,8 @@ export class Aircraft {
       pitchDeg: this.pitch / DEG,
       rollDeg: this.roll / DEG,
       speedKt: this.speed * 1.94384,
+      vSpeedMs: this.vSpeed || 0,
+      headingRad: this.heading,
       onGround: this.onGround,
     };
   }
