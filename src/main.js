@@ -34,9 +34,27 @@ function updateCamera() {
   const s = aircraft.state();
   const hdg = s.headingDeg * DEG;
 
-  // 机后方水平距离 & 相对高度（chase）/ 机头前 & 视高（cockpit）
-  const back = camMode === 'chase' ? 240 : -10; // 米，正=机后
-  const up = camMode === 'chase' ? 85 : 3;
+  // 关键：相机到飞机的距离需随高度增大，否则 MapLibre 的 zoom 不变、
+  // 地形尺度恒定，飞得再高地面也不会变小变远。
+  // 飞机由独立 Three 叠层渲染，放大相机距离不会改变飞机在屏幕上的大小，
+  // 只会让地形按真实透视缩小。
+  // 用"离地高度(AGL)"作为基准：dist 随 AGL 线性增长，并设上下限。
+  let groundElev = 0;
+  try {
+    const e = map.queryTerrainElevation([s.lon, s.lat], { exaggerated: false });
+    if (typeof e === 'number' && isFinite(e)) groundElev = e;
+  } catch (_) {}
+  const agl = Math.max(30, s.alt - groundElev);
+
+  // 追尾：基础 180m + 随 AGL 增长；座舱：贴近机头
+  let back, up;
+  if (camMode === 'chase') {
+    back = 180 + agl * 0.9;          // 高度越高，镜头拉得越远
+    up = 60 + agl * 0.35;            // 视点也相应抬高
+  } else {
+    back = -10;
+    up = 3;
+  }
 
   // 相机经纬度（在机的反航向方向后退 back 米）
   const latRad = s.lat * DEG;
