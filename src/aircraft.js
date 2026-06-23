@@ -242,6 +242,11 @@ export class Aircraft {
       stalled: this.stalled,
       loadFactor: this.loadFactor,
       alphaDeg: (this.pitch - this.gamma) / DEG,
+      // 操纵指令（供控制面动画）
+      inPitch: this.input.pitch,
+      inRoll: this.input.roll,
+      inYaw: this.input.yaw,
+      throttle: this.throttle,
     };
   }
 }

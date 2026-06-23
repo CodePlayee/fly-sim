@@ -35,6 +35,11 @@ export function createAircraftOverlay(getAircraftState) {
   const plane = buildBoeing737();
   pivot.add(plane);
   scene.add(pivot);
+  const ctl = plane.userData.controls || {};
+
+  // 控制面平滑状态 + 风扇转角累计
+  const surf = { ail: 0, elev: 0, rud: 0, fanAngle: 0 };
+  let lastT = null;
 
   // 固定基变换：机体坐标(+X机头,+Y左翼,+Z上) -> 屏幕坐标
   //   机头 +X -> -Z（射入屏幕=飞行方向，远离追尾相机）
@@ -99,6 +104,13 @@ export function createAircraftOverlay(getAircraftState) {
       -s.rollDeg * DEG    // 绕 Z：滚转
     );
 
+    // ---- 控制面动画 ----
+    // 时间步长（用 performance.now 的差；首帧置 0）
+    const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const dt = lastT == null ? 0 : Math.min((now - lastT) / 1000, 0.1);
+    lastT = now;
+    animateControls(s, dt);
+
     // 相机：追尾在机后上方，看向飞机
     if (camMode === 'chase') {
       camera.position.set(0, 14, 62); // 上方、后方（场景单位=米）
@@ -111,6 +123,42 @@ export function createAircraftOverlay(getAircraftState) {
 
     renderer.render(scene, camera);
   }
+
+  // 控制面 / 风扇动画：根据操纵指令与姿态平滑偏转
+  const MAXDEF = 16 * DEG; // 舵面最大偏角（真实量级）
+  function animateControls(s, dt) {
+    const k = dt > 0 ? Math.min(dt * 8, 1) : 1; // 平滑系数（趋向目标）
+
+    // 目标偏角：优先用操纵指令，无输入时用姿态/转弯近似
+    const rollCmd = s.inRoll != null && s.inRoll !== 0 ? s.inRoll : -s.rollDeg / 35;
+    const pitchCmd = s.inPitch != null && s.inPitch !== 0 ? s.inPitch : s.pitchDeg / 30;
+    const yawCmd = s.inYaw != null && s.inYaw !== 0 ? s.inYaw : -s.rollDeg / 60; // 转弯时方向舵随动
+
+    surf.ail += (clampUnit(rollCmd) * MAXDEF - surf.ail) * k;
+    surf.elev += (clampUnit(pitchCmd) * MAXDEF - surf.elev) * k;
+    surf.rud += (clampUnit(yawCmd) * MAXDEF - surf.rud) * k;
+
+    // 副翼差动：左右反向（右压杆 -> 右副翼上偏、左副翼下偏）
+    // 舵面绕展向(本地 Y)轴旋转；左右翼组用 scale.y=±1 镜像，
+    // 故同一旋转量在两侧表现相反，正好形成差动，这里再叠加符号确保方向正确。
+    if (ctl.aileronL) ctl.aileronL.rotation.y = surf.ail;
+    if (ctl.aileronR) ctl.aileronR.rotation.y = surf.ail;
+
+    // 升降舵：左右同向，绕展向轴
+    if (ctl.elevatorL) ctl.elevatorL.rotation.y = -surf.elev;
+    if (ctl.elevatorR) ctl.elevatorR.rotation.y = -surf.elev;
+
+    // 方向舵：绕垂直(本地 Z)轴
+    if (ctl.rudder) ctl.rudder.rotation.z = surf.rud;
+
+    // 风扇旋转：转速随油门（怠速也微转）
+    const rps = 2 + (s.throttle || 0) * 26; // 转/秒
+    surf.fanAngle += rps * Math.PI * 2 * dt;
+    if (ctl.fanL) ctl.fanL.rotation.x = surf.fanAngle;
+    if (ctl.fanR) ctl.fanR.rotation.x = surf.fanAngle;
+  }
+
+  function clampUnit(v) { return Math.max(-1, Math.min(1, v)); }
 
   return { render, setLight, setCamMode, plane };
 }
