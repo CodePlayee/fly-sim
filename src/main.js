@@ -6,6 +6,7 @@ import { Aircraft } from './aircraft.js';
 import { setupHud } from './hud.js';
 import { createAircraftOverlay } from './aircraftLayer.js';
 import { createGPWS } from './gpws.js';
+import { setupMinimap } from './minimap.js';
 
 let currentAirport = AIRPORTS[DEFAULT_AIRPORT];
 const aircraft = new Aircraft(currentAirport);
@@ -120,6 +121,7 @@ function goToAirport(icao) {
     pitch: 75,
     bearing: currentAirport.runwayHeading,
   });
+  if (typeof minimap !== 'undefined') minimap.reset(); // 清空航迹
   refreshLighting();
 }
 
@@ -164,6 +166,9 @@ window.flySim = {
 
 const hud = setupHud(window.flySim, AIRPORTS);
 
+// ---- 右下角导航小地图（ND）----
+const minimap = setupMinimap(AIRPORTS);
+
 // ---- 近地警告系统（GPWS）----
 const gpws = createGPWS(map, () => aircraft.state());
 let gpwsInfo = { level: 'none', aglHere: Infinity };
@@ -193,6 +198,20 @@ function frame() {
   }
   hud.update();
   hud.setGPWS(gpwsInfo, now); // 须在 update 之后，避免 AGL 读数被重建覆盖
+
+  // 导航小地图
+  const ms = aircraft.state();
+  minimap.update(
+    {
+      lon: ms.lon,
+      lat: ms.lat,
+      headingDeg: (ms.headingDeg + 360) % 360,
+      onGround: ms.onGround,
+      alt: ms.alt,
+    },
+    currentAirport.icao,
+    now
+  );
   requestAnimationFrame(frame);
 }
 
