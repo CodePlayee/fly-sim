@@ -159,6 +159,8 @@ window.flySim = {
       speedKt: Math.round(s.speedKt),
       headingDeg: Math.round((s.headingDeg + 360) % 360),
       onGround: s.onGround,
+      stalled: s.stalled,
+      loadFactor: s.loadFactor,
       ready: true,
     };
   },

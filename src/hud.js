@@ -104,7 +104,8 @@ export function setupHud(api, airports) {
       <div>高度 &nbsp;<b>${s.alt}</b> m</div>
       <div>航向 &nbsp;<b>${String(s.headingDeg).padStart(3,'0')}</b>°</div>
       <div>离地 &nbsp;<b id="hud-agl">--</b> m</div>
-      <div>状态 &nbsp;<b>${s.onGround ? '地面' : '空中'}</b></div>`;
+      <div>过载 &nbsp;<b>${s.loadFactor != null ? s.loadFactor.toFixed(2) : '1.00'}</b> g</div>
+      <div>状态 &nbsp;<b style="color:${s.stalled ? '#ff5252' : '#cfe8ff'}">${s.onGround ? '地面' : (s.stalled ? '⚠ 失速 STALL' : '空中')}</b></div>`;
   }
 
   // 近地警告状态显示（含闪烁）
