@@ -8,6 +8,7 @@ import { createAircraftOverlay } from './aircraftLayer.js';
 import { createGPWS } from './gpws.js';
 import { setupMinimap } from './minimap.js';
 import { setupFlightSelect } from './flightSelect.js';
+import { createTerrain } from './terrain.js';
 
 let currentAirport = AIRPORTS[DEFAULT_AIRPORT];
 let currentFlight = null; // { depIcao, dest } 由起始选择界面设定
@@ -17,6 +18,10 @@ const map = await createMap('map', currentAirport);
 
 // ---- 程序化 737 模型（独立透明 Three.js 画布，叠加在地图前景）----
 const aircraftOverlay = createAircraftOverlay(() => aircraft.state());
+
+// ---- 地形高程查询器（自解码 Terrarium DEM，供相机/GPWS 共用）----
+// 不用 map.queryTerrainElevation：其在大 pitch 下返回系统性错误高程。
+const terrain = createTerrain({ maxZoom: 14 });
 
 // 当前时间状态（可被时间滑块覆盖）
 let simDate = new Date();
@@ -43,10 +48,8 @@ function updateCamera() {
   // 只会让地形按真实透视缩小。
   // 用"离地高度(AGL)"作为基准：dist 随 AGL 线性增长，并设上下限。
   let groundElev = 0;
-  try {
-    const e = map.queryTerrainElevation([s.lon, s.lat], { exaggerated: false });
-    if (typeof e === 'number' && isFinite(e)) groundElev = e;
-  } catch (_) {}
+  const e = terrain.elevationAt(s.lon, s.lat);
+  if (typeof e === 'number' && isFinite(e)) groundElev = e;
   const agl = Math.max(30, s.alt - groundElev);
 
   // 追尾：基础 180m + 随 AGL 增长；座舱：贴近机头
@@ -188,7 +191,7 @@ const flightSelect = setupFlightSelect(AIRPORTS, (plan) => {
 });
 
 // ---- 近地警告系统（GPWS）----
-const gpws = createGPWS(map, () => aircraft.state());
+const gpws = createGPWS(map, () => aircraft.state(), terrain);
 let gpwsInfo = { level: 'none', aglHere: Infinity };
 let lastGpwsEval = 0;
 window.flySim.getGPWS = () => gpwsInfo;
@@ -202,6 +205,9 @@ function frame() {
 
   pollInput();
   aircraft.update(dt);
+
+  // 预取飞机正下方 DEM 瓦片，保证 AGL/相机高程查询命中
+  terrain.prefetch(aircraft.lon, aircraft.lat);
 
   // 真实时间推进（未手动锁定时）
   if (manualLocalHour == null) simDate = new Date();

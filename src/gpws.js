@@ -1,11 +1,16 @@
 import maplibregl from 'maplibre-gl';
+import { createTerrain } from './terrain.js';
 
 /**
  * 近地警告系统（GPWS / Ground Proximity Warning System）。
  *
  * 原理：从飞机当前位置出发，沿预测航迹（按当前航向、地速、垂直速度外推）
- * 采样若干点，用 map.queryTerrainElevation 取该点地形高度，
+ * 采样若干点，取该点真实地形高度，
  * 计算预测航迹相对地形的最小离地余量(AGL)与"撞地剩余时间"，分级告警。
+ *
+ * 地形高程来自 src/terrain.js（直接解码 Terrarium DEM 瓦片），
+ * 不用 map.queryTerrainElevation（其在大 pitch 下返回系统性错误值，
+ * 实测把 957m 的山读成 64m 甚至负数）。
  *
  * 告警分级（参考真实 GPWS 模式）：
  *   none    安全
@@ -16,7 +21,9 @@ import maplibregl from 'maplibre-gl';
 const DEG = Math.PI / 180;
 const R = 6378137;
 
-export function createGPWS(map, getAircraftState) {
+export function createGPWS(map, getAircraftState, terrain) {
+  // 允许外部注入共享的 terrain 实例；未提供则自建
+  const terr = terrain || createTerrain({ maxZoom: 14 });
   // 预测参数
   const HORIZON_S = 30;     // 向前预测的时间(秒)
   const STEP_S = 1.0;       // 采样步长(秒)
@@ -46,7 +53,7 @@ export function createGPWS(map, getAircraftState) {
     let timeToImpact = Infinity;
 
     // 飞机当前正下方离地（即时 AGL）
-    const elevHere = sampleTerrain(map, s.lon, s.lat);
+    const elevHere = sampleTerrain(terr, s.lon, s.lat);
     const aglHere = alt - elevHere;
     minAgl = aglHere;
 
@@ -62,7 +69,9 @@ export function createGPWS(map, getAircraftState) {
       // 垂直推进（假定当前垂直速度延续；预测保守起见不假设拉起）
       alt += vSpeed * STEP_S;
 
-      const elev = sampleTerrain(map, lon, lat);
+      // 预取更前方的瓦片，降低采样落空概率
+      terr.prefetch(lon, lat);
+      const elev = sampleTerrain(terr, lon, lat);
       if (elev == null) continue;
       const agl = alt - elev;
       if (agl < minAgl) minAgl = agl;
@@ -92,12 +101,16 @@ export function createGPWS(map, getAircraftState) {
   return { evaluate, getLast: () => last };
 }
 
-/** 查询某经纬度的地形高程（米）。无地形数据时返回 0。 */
-function sampleTerrain(map, lon, lat) {
-  try {
-    const e = map.queryTerrainElevation([lon, lat], { exaggerated: false });
-    return typeof e === 'number' && isFinite(e) ? e : 0;
-  } catch {
-    return 0;
+/**
+ * 查询某经纬度的地形高程（米）。
+ * 用自解码 DEM；瓦片未就绪时返回上次有效值（避免瞬时落空导致 AGL 跳变）。
+ */
+let _lastElev = 0;
+function sampleTerrain(terr, lon, lat) {
+  const e = terr.elevationAt(lon, lat);
+  if (typeof e === 'number' && isFinite(e)) {
+    _lastElev = e;
+    return e;
   }
+  return _lastElev; // 兜底：用最近一次有效高程
 }
