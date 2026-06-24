@@ -8,13 +8,15 @@
 
 | 模块 | 方案 | 是否需 key |
 |------|------|-----------|
-| 渲染引擎 | **MapLibre GL JS**（开源） | 否 |
-| 全球高程地形 | **AWS 开放数据集 Terrarium DEM**（`elevation-tiles-prod`） | 否 |
-| 卫星影像 | **Esri World Imagery** | 否 |
-| 天空大气 | MapLibre `setSky` | 否 |
+| 渲染引擎 | **three.js**（统一 3D 场景：飞机与地形同场景） | 否 |
+| 全球地形 mesh | **geo-three** + 自定义 provider 喂 AWS Terrarium DEM | 否 |
+| 卫星影像贴图 | **Esri World Imagery** | 否 |
+| 天空大气 | three.js **Sky**（Preetham） | 否 |
 | 太阳/月亮位置与光照 | **SunCalc**（纯本地天文计算） | 否 |
 
-MapLibre 原生支持 `raster-dem` 地形，自动 LOD / 流式加载全球真实高程，无需自建瓦片管线。
+飞机与地形渲染在**同一个 three.js 场景**、共享相机与深度缓冲，因此离地高度(AGL)、
+碰撞、近地警告与遮挡都**所见即所得**。geo-three 用四叉树 LOD 流式加载全球真实高程，
+高程瓦片用 Terrarium 编码（在 provider 内转码为 geo-three 期望的 Mapbox RGB）。
 
 ## 运行
 
@@ -69,16 +71,21 @@ SunCalc 按机场真实经纬度 + 时刻计算太阳/月亮的方位角与高�
 
 ```
 src/
-  main.js          # 入口：相机跟随、输入、主循环、对外 API
-  scene.js         # MapLibre 地图样式：DEM 地形 + 卫星影像 + 山体阴影
-  lighting.js      # SunCalc 太阳/月亮 -> 天空/雾/光照
+  main.js          # 入口：统一场景编排、相机跟随、输入、主循环、对外 API
+  world.js         # three.js 渲染器/场景/相机 + geo-three 全球地形 MapView
+  geoUtils.js      # 经纬度<->世界坐标（含原点平移，避免浮点抖动）
+  providers/       # geo-three 自定义瓦片源
+    EsriImageryProvider.js      # Esri 卫星影像（颜色贴图）
+    TerrariumHeightProvider.js  # AWS Terrarium DEM（转码为 Mapbox RGB 高程）
+  lighting.js      # SunCalc 太阳/月亮 -> three.js Sky/平行光/环境光/雾
   airports.js      # 3 个机场预设
   routes.js        # 真实航班航线数据（OpenFlights 离线生成，勿手改）
   flightSelect.js  # 起始航班选择界面（出发机场 + 目的地航线 + 自动导航）
   aircraft.js      # 6-DOF-lite 飞行动力学（点质量+姿态，带攻角升力曲线）
+  aircraftModel.js # 737 模型进共享场景：世界定位/姿态/控制面动画
   gpws.js          # 近地警告系统（沿预测航迹采样地形）
   boeing737.js     # 程序化生成的波音 737 模型（纯 Three.js 几何体）
-  aircraftLayer.js # 透明 Three.js 画布叠层，渲染 737 于地图前景
+  terrain.js       # 自解码 Terrarium DEM 高程查询（供 AGL 数字，准、不依赖 LOD）
   hud.js           # HUD、夜间叠层、航班横幅、控制 UI
   minimap.js       # 右下角导航小地图（ND，北朝上，航迹/机场/航向/航班目的地）
 scripts/

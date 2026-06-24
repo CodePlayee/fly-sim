@@ -40,14 +40,14 @@ await page.waitForFunction(() => window.flySim && window.flySim.getState().ready
 // 关闭起始航班选择界面（截图脚本通过 API 驱动，不走 UI 选择）
 await page.evaluate(() => { const o = document.getElementById('flight-select'); if (o) o.remove(); });
 // 再等地形/影像瓦片首次加载
-await page.waitForFunction(() => window.flySim.map.areTilesLoaded(), { timeout: 60000 }).catch(() => {});
+await page.waitForFunction(() => window.flySim.tilesReady(), { timeout: 60000 }).catch(() => {});
 console.log('flySim 就绪，开始截图。');
 
 // 预热：先把三个机场各加载一遍，填充瓦片缓存，避免首截图瓦片未到位
 for (const icao of ['VHHH', 'KSFO', 'LFPG']) {
   await page.evaluate((icao) => window.flySim.goToAirport(icao), icao);
-  await page.waitForFunction(() => window.flySim.map.areTilesLoaded(), { timeout: 30000 }).catch(() => {});
-  await sleep(2000);
+  await page.waitForFunction(() => window.flySim.tilesReady(), { timeout: 30000 }).catch(() => {});
+  await sleep(4000);
 }
 
 for (const [icao, hour, label] of SCENES) {
@@ -56,8 +56,8 @@ for (const [icao, hour, label] of SCENES) {
     window.flySim.setLocalHour(hour);
   }, icao, hour);
   // 等地形/影像瓦片加载
-  await page.waitForFunction(() => window.flySim.map.areTilesLoaded(), { timeout: 30000 }).catch(() => {});
-  await sleep(5000);
+  await page.waitForFunction(() => window.flySim.tilesReady(), { timeout: 30000 }).catch(() => {});
+  await sleep(12000);
   const out = join(SHOTS, `${label}.png`);
   await page.screenshot({ path: out });
   console.log(`  ✓ ${label} -> ${out}`);
@@ -70,8 +70,8 @@ await page.evaluate(() => {
   window.flySim.setAirborne(1800, 200);
   window.flySim.setBank(18);
 });
-await page.waitForFunction(() => window.flySim.map.areTilesLoaded(), { timeout: 30000 }).catch(() => {});
-await sleep(4000);
+await page.waitForFunction(() => window.flySim.tilesReady(), { timeout: 30000 }).catch(() => {});
+await sleep(12000);
 await page.screenshot({ path: join(SHOTS, 'vhhh-airborne-bank.png') });
 console.log('  ✓ vhhh-airborne-bank');
 

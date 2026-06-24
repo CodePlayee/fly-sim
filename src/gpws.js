@@ -1,4 +1,3 @@
-import maplibregl from 'maplibre-gl';
 import { createTerrain } from './terrain.js';
 
 /**

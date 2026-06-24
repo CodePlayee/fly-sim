@@ -1,131 +1,155 @@
 import SunCalc from 'suncalc';
+import * as THREE from 'three';
+import { Sky } from 'three/examples/jsm/objects/Sky.js';
 
 /**
  * 用 SunCalc（纯本地计算，无网络）按真实经纬度+时刻求太阳/月亮位置，
- * 据此驱动 MapLibre 天空大气、雾霾、地形光照方向与昼夜明暗。
+ * 据此驱动 three.js 天空大气(Sky)、平行光(太阳/月亮)、环境光与雾，
+ * 实现随真实时间变化的昼夜光照。
  *
- * MapLibre setSky 的 sun 用 [方位角(度), 极角(度)]：
- *   方位角 0=北，顺时针；极角 0=天顶，90=地平线，180=正下方。
- * SunCalc 返回 azimuth（弧度，从正南起，向西为正）与 altitude（弧度，地平线以上为正）。
+ * SunCalc：azimuth 弧度（从正南起、向西为正），altitude 弧度（地平线以上为正）。
+ * 天体方位角（以北为 0、顺时针）= 180 + azimuth(度)。
  */
 
-function sunCalcToSky(azimuthRad, altitudeRad) {
-  // SunCalc azimuth: 0 = 南，π/2 = 西。转为以北为 0、顺时针的方位角：
-  const azDeg = (180 + (azimuthRad * 180) / Math.PI + 360) % 360;
-  // altitude -> 极角：天顶=0，地平线=90
-  const polarDeg = 90 - (altitudeRad * 180) / Math.PI;
-  return [azDeg, Math.max(0, Math.min(180, polarDeg))];
-}
+const DEG = Math.PI / 180;
 
-/** 根据太阳高度角返回一组天空/雾/光照配色 */
+/** 根据太阳高度角返回一组天空/光照配色与强度 */
 function palette(sunAltDeg) {
-  // 关键阈值：白天 / 黄昏 / 夜晚
   if (sunAltDeg > 10) {
+    // 白天
     return {
-      atmosphere: '#bcd9ff',
-      sky: '#4a90e2',
-      fog: 'rgba(190,215,240,0.18)',
-      ambient: 1.0,
-      sunIntensity: 12,
-      haloColor: '#fffaf0',
+      fog: '#bcd9ff',
+      sun: '#fffaf0',
+      ambient: '#9fb8d8',
+      ambientIntensity: 0.55,
+      sunIntensity: 2.6,
+      turbidity: 6,
+      rayleigh: 1.6,
+      ambientLevel: 1.0,
     };
   } else if (sunAltDeg > -2) {
     // 日出/日落金光
     return {
-      atmosphere: '#ffb56b',
-      sky: '#2a4a82',
-      fog: 'rgba(255,170,100,0.22)',
-      ambient: 0.6,
-      sunIntensity: 8,
-      haloColor: '#ffd9a0',
+      fog: '#ffb56b',
+      sun: '#ffd9a0',
+      ambient: '#7a6a7a',
+      ambientIntensity: 0.4,
+      sunIntensity: 1.8,
+      turbidity: 10,
+      rayleigh: 3,
+      ambientLevel: 0.6,
     };
   } else if (sunAltDeg > -10) {
     // 暮光/蓝调
     return {
-      atmosphere: '#5a6a9a',
-      sky: '#13203f',
-      fog: 'rgba(60,75,120,0.3)',
-      ambient: 0.35,
-      sunIntensity: 4,
-      haloColor: '#9fb0d8',
+      fog: '#3a4a6a',
+      sun: '#9fb0d8',
+      ambient: '#3a4660',
+      ambientIntensity: 0.28,
+      sunIntensity: 0.5,
+      turbidity: 4,
+      rayleigh: 1,
+      ambientLevel: 0.35,
     };
   }
   // 夜晚
   return {
-    atmosphere: '#1a2540',
-    sky: '#05080f',
-    fog: 'rgba(10,15,30,0.4)',
-    ambient: 0.18,
-    sunIntensity: 2,
-    haloColor: '#2a3a60',
+    fog: '#0a0f1e',
+    sun: '#2a3a60',
+    ambient: '#1a2540',
+    ambientIntensity: 0.18,
+    sunIntensity: 0.15,
+    turbidity: 0.5,
+    rayleigh: 0.2,
+    ambientLevel: 0.18,
   };
 }
 
 /**
- * 应用某时刻、某经纬度的光照到地图。
- * @param map MapLibre 地图
+ * 建立一次光照装置（Sky 穹顶 + 平行光 + 环境光 + 雾），返回 env 句柄。
+ * 之后 applyLighting(env, ...) 每次时间变化时更新它。
+ */
+export function setupSky(scene) {
+  const sky = new Sky();
+  sky.scale.setScalar(450000);
+  scene.add(sky);
+  const u = sky.material.uniforms;
+  u.turbidity.value = 6;
+  u.rayleigh.value = 1.6;
+  u.mieCoefficient.value = 0.005;
+  u.mieDirectionalG.value = 0.8;
+
+  const sunLight = new THREE.DirectionalLight(0xffffff, 2.5);
+  scene.add(sunLight);
+  scene.add(sunLight.target);
+
+  const ambLight = new THREE.AmbientLight(0x9fb8d8, 0.55);
+  scene.add(ambLight);
+
+  scene.fog = new THREE.Fog(0xbcd9ff, 8000, 160000);
+
+  return { scene, sky, sunLight, ambLight };
+}
+
+/**
+ * 应用某时刻、某经纬度的光照到 three.js 场景。
+ * @param env setupSky 返回的句柄 { scene, sky, sunLight, ambLight }
  * @param date JS Date（UTC 时刻）
  * @param lon,lat 观察点
+ * @returns { sunAltDeg, useMoon, azimuth, polar, ambient } （形状保持与旧版兼容）
  */
-export function applyLighting(map, date, lon, lat) {
+export function applyLighting(env, date, lon, lat) {
   const sun = SunCalc.getPosition(date, lat, lon);
   const moon = SunCalc.getMoonPosition(date, lat, lon);
   const sunAltDeg = (sun.altitude * 180) / Math.PI;
 
-  const [sunAz, sunPolar] = sunCalcToSky(sun.azimuth, sun.altitude);
-  const pal = palette(sunAltDeg);
-
   // 夜间太阳在地平线下，改用月亮作为天体光照方向
   const useMoon = sunAltDeg < -6 && moon.altitude > 0;
-  const [az, polar] = useMoon
-    ? sunCalcToSky(moon.azimuth, moon.altitude)
-    : [sunAz, sunPolar];
+  const bodyAz = useMoon ? moon.azimuth : sun.azimuth; // 弧度，从南起向西
+  const bodyAlt = useMoon ? moon.altitude : sun.altitude;
 
-  // 天空大气（MapLibre v4 sky spec）
-  try {
-    map.setSky({
-      'sky-color': pal.sky,
-      'horizon-color': pal.atmosphere,
-      'fog-color': pal.fog,
-      'fog-ground-blend': sunAltDeg > 5 ? 0.85 : 0.5,
-      'horizon-fog-blend': sunAltDeg > 5 ? 0.4 : 0.7,
-      'sky-horizon-blend': 0.6,
-      'atmosphere-blend': sunAltDeg > -10 ? 0.6 : 0.2,
-    });
-  } catch (e) {
-    // 旧版 sky 规格回退
-    map.setSky({
-      'atmosphere-sun': [az, polar],
-      'atmosphere-sun-intensity': pal.sunIntensity,
-      'atmosphere-color': pal.atmosphere,
-      'atmosphere-halo-color': pal.haloColor,
-    });
+  // 方位角（以北为 0、顺时针）与极角（天顶=0）
+  const azimuthDeg = (180 + (bodyAz * 180) / Math.PI + 360) % 360;
+  const polarDeg = 90 - (bodyAlt * 180) / Math.PI;
+  const azimuth = azimuthDeg * DEG;
+  const polar = polarDeg * DEG;
+
+  const pal = palette(sunAltDeg);
+
+  // ---- 天体方向单位向量（世界系：北=-Z、东=+X、上=+Y）----
+  // 方位角以北(−Z)为 0、顺时针(向东+X)；极角自天顶。
+  const sinP = Math.sin(polar);
+  const dir = new THREE.Vector3(
+    sinP * Math.sin(azimuth), // 东分量 +X
+    Math.cos(polar), //          上分量 +Y
+    -sinP * Math.cos(azimuth) // 北分量 -Z
+  );
+
+  // ---- Sky 穹顶 ----
+  const u = env.sky.material.uniforms;
+  u.sunPosition.value.copy(dir);
+  u.turbidity.value = pal.turbidity;
+  u.rayleigh.value = pal.rayleigh;
+
+  // ---- 平行光（从天体方向射向场景）----
+  env.sunLight.position.copy(dir).multiplyScalar(100000);
+  env.sunLight.target.position.set(0, 0, 0);
+  env.sunLight.target.updateMatrixWorld();
+  env.sunLight.color.set(pal.sun);
+  env.sunLight.intensity = pal.sunIntensity;
+
+  // ---- 环境光 ----
+  env.ambLight.color.set(pal.ambient);
+  env.ambLight.intensity = pal.ambientIntensity;
+
+  // ---- 雾 ----
+  if (env.scene.fog) {
+    env.scene.fog.color.set(pal.fog);
+    // 白天看得远，夜晚/暮光收近
+    env.scene.fog.far = sunAltDeg > 0 ? 180000 : 90000;
   }
 
-  // 用天体方位驱动山体阴影方向，模拟太阳/月亮真实照射角
-  if (map.getLayer('hillshade')) {
-    map.setPaintProperty('hillshade', 'hillshade-illumination-direction', Math.round(az));
-    map.setPaintProperty(
-      'hillshade',
-      'hillshade-exaggeration',
-      Math.max(0.15, pal.ambient * 0.55)
-    );
-    // 夜间整体压暗高光
-    map.setPaintProperty(
-      'hillshade',
-      'hillshade-highlight-color',
-      sunAltDeg > 0 ? '#ffffff' : '#3a4660'
-    );
-  }
-
-  // 卫星影像随昼夜整体明暗（用 raster-brightness 模拟环境光）
-  if (map.getLayer('satellite')) {
-    const b = Math.max(0.12, Math.min(1, pal.ambient));
-    map.setPaintProperty('satellite', 'raster-brightness-max', b);
-    map.setPaintProperty('satellite', 'raster-brightness-min', 0);
-  }
-
-  return { sunAltDeg, useMoon, azimuth: az, polar, ambient: pal.ambient };
+  return { sunAltDeg, useMoon, azimuth, polar, ambient: pal.ambientLevel };
 }
 
 /** 把"机场当地某钟点"换算为 UTC Date */

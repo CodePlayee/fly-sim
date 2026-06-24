@@ -1,26 +1,34 @@
-import maplibregl from 'maplibre-gl';
-import { createMap } from './scene.js';
-import { applyLighting, localHourToDate } from './lighting.js';
+import * as THREE from 'three';
+import { createWorld } from './world.js';
+import { setOrigin, geoToWorld, headingToForward } from './geoUtils.js';
+import { applyLighting, localHourToDate, setupSky } from './lighting.js';
 import { AIRPORTS, DEFAULT_AIRPORT } from './airports.js';
 import { Aircraft } from './aircraft.js';
 import { setupHud } from './hud.js';
-import { createAircraftOverlay } from './aircraftLayer.js';
+import { createAircraftModel } from './aircraftModel.js';
 import { createGPWS } from './gpws.js';
 import { setupMinimap } from './minimap.js';
 import { setupFlightSelect } from './flightSelect.js';
 import { createTerrain } from './terrain.js';
 
+const DEG = Math.PI / 180;
+
 let currentAirport = AIRPORTS[DEFAULT_AIRPORT];
 let currentFlight = null; // { depIcao, dest } 由起始选择界面设定
 const aircraft = new Aircraft(currentAirport);
 
-const map = await createMap('map', currentAirport);
+// ---- 统一 three.js 世界（场景原点平移到起始机场，避免浮点抖动）----
+setOrigin(currentAirport.lat, currentAirport.lon);
+const { renderer, scene, camera, mapView } = createWorld();
 
-// ---- 程序化 737 模型（独立透明 Three.js 画布，叠加在地图前景）----
-const aircraftOverlay = createAircraftOverlay(() => aircraft.state());
+// ---- 光照装置（Sky 穹顶 + 平行光 + 环境光 + 雾）----
+const env = setupSky(scene);
 
-// ---- 地形高程查询器（自解码 Terrarium DEM，供相机/GPWS 共用）----
-// 不用 map.queryTerrainElevation：其在大 pitch 下返回系统性错误高程。
+// ---- 程序化 737 模型（进共享场景）----
+const aircraftModel = createAircraftModel(scene);
+
+// ---- 地形高程查询器（自解码 Terrarium DEM，供 AGL/GPWS）----
+// 注意：geo-three 负责"视觉"地形；AGL 数字仍用 terrain.js（准、不依赖 LOD 加载态）。
 const terrain = createTerrain({ maxZoom: 14 });
 
 // 当前时间状态（可被时间滑块覆盖）
@@ -34,64 +42,43 @@ function currentDate() {
   return simDate;
 }
 
-// ---- 相机：第三人称追尾，用 calculateCameraOptionsFromTo（MapLibre 4.x）----
+// ---- 相机：第三人称追尾 / 座舱（世界坐标直接放置）----
 let camMode = 'chase'; // chase | cockpit
-const DEG = Math.PI / 180;
+const _acPos = new THREE.Vector3();
+const _fwd = new THREE.Vector3();
+const _camPos = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0);
 
 function updateCamera() {
   const s = aircraft.state();
-  const hdg = s.headingDeg * DEG;
+  geoToWorld(s.lat, s.lon, s.alt, _acPos); // 飞机世界位置
+  headingToForward(s.headingRad, _fwd); // 前向单位向量（北=-z）
 
-  // 关键：相机到飞机的距离需随高度增大，否则 MapLibre 的 zoom 不变、
-  // 地形尺度恒定，飞得再高地面也不会变小变远。
-  // 飞机由独立 Three 叠层渲染，放大相机距离不会改变飞机在屏幕上的大小，
-  // 只会让地形按真实透视缩小。
-  // 用"离地高度(AGL)"作为基准：dist 随 AGL 线性增长，并设上下限。
-  let groundElev = 0;
-  const e = terrain.elevationAt(s.lon, s.lat);
-  if (typeof e === 'number' && isFinite(e)) groundElev = e;
-  const agl = Math.max(30, s.alt - groundElev);
-
-  // 追尾：基础 180m + 随 AGL 增长；座舱：贴近机头
-  let back, up;
-  if (camMode === 'chase') {
-    back = 180 + agl * 0.9;          // 高度越高，镜头拉得越远
-    up = 60 + agl * 0.35;            // 视点也相应抬高
+  if (camMode === 'cockpit') {
+    // 座舱：机头前上方一点，朝飞行方向看
+    _camPos.copy(_acPos).addScaledVector(_fwd, 6);
+    _camPos.y += 2;
+    camera.position.copy(_camPos);
+    camera.up.set(0, 1, 0);
+    const look = _acPos.clone().addScaledVector(_fwd, 1000);
+    look.y += 2;
+    camera.lookAt(look);
   } else {
-    back = -10;
-    up = 3;
-  }
-
-  // 相机经纬度（在机的反航向方向后退 back 米）
-  const latRad = s.lat * DEG;
-  const camLat = s.lat - (back * Math.cos(hdg)) / 111320;
-  const camLon = s.lon - (back * Math.sin(hdg)) / (111320 * Math.cos(latRad));
-  const camAlt = s.alt + up;
-
-  // 由"相机点 -> 目标点"反算 center/zoom/bearing/pitch
-  const camPos = { lng: camLon, lat: camLat, alt: camAlt };
-  const target = { lng: s.lon, lat: s.lat, alt: s.alt };
-  try {
-    const opts = map.calculateCameraOptionsFromTo(
-      camPos,
-      camAlt,
-      target,
-      s.alt
-    );
-    map.jumpTo(opts);
-  } catch (e) {
-    // 兜底：直接对准飞机
-    map.jumpTo({ center: [s.lon, s.lat], bearing: s.headingDeg, pitch: 75, zoom: 15 });
+    // 追尾：机后上方，距离随高度（视觉舒适）
+    const back = 120;
+    const up = 42;
+    _camPos.copy(_acPos).addScaledVector(_fwd, -back);
+    _camPos.y += up;
+    camera.position.copy(_camPos);
+    camera.up.set(0, 1, 0);
+    camera.lookAt(_acPos);
   }
 }
 
 // ---- 光照刷新 ----
 function refreshLighting() {
-  const info = applyLighting(map, currentDate(), aircraft.lon, aircraft.lat);
+  const info = applyLighting(env, currentDate(), aircraft.lon, aircraft.lat);
   hud.setNightOverlay(info ? info.sunAltDeg : 90);
-  if (info) {
-    aircraftOverlay.setLight(info.sunAltDeg, info.azimuth);
-  }
 }
 
 // ---- 键盘输入 ----
@@ -100,7 +87,6 @@ window.addEventListener('keydown', (e) => {
   keys.add(e.code);
   if (e.code === 'KeyV') {
     camMode = camMode === 'chase' ? 'cockpit' : 'chase';
-    aircraftOverlay.setCamMode(camMode);
   }
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
 });
@@ -120,12 +106,6 @@ function pollInput() {
 function goToAirport(icao) {
   currentAirport = AIRPORTS[icao];
   aircraft.reset(currentAirport);
-  map.jumpTo({
-    center: [currentAirport.lon, currentAirport.lat],
-    zoom: 14,
-    pitch: 75,
-    bearing: currentAirport.runwayHeading,
-  });
   if (typeof minimap !== 'undefined') minimap.reset(); // 清空航迹
   refreshLighting();
 }
@@ -138,12 +118,29 @@ function startFlight({ depIcao, dest }) {
   hud.setFlight && hud.setFlight(depIcao, dest);
 }
 
-// ---- 对外 API（供 HUD / 截图脚本）----
+// ---- tilesReady：地形是否就绪（替代 MapLibre areTilesLoaded）----
+// 用飞机正下方向下 raycast 命中 mapView 判断；并有启动超时兜底，截图不挂死。
+const _ray = new THREE.Raycaster();
+const _down = new THREE.Vector3(0, -1, 0);
+const _startTime = performance.now();
+function tilesReady() {
+  if (performance.now() - _startTime > 6000) return true; // 兜底超时
+  geoToWorld(aircraft.lat, aircraft.lon, 0, _acPos);
+  _ray.set(new THREE.Vector3(_acPos.x, 1e6, _acPos.z), _down);
+  return _ray.intersectObject(mapView, true).length > 0;
+}
+
+// ---- 对外 API（供 HUD / 小地图 / 截图脚本）----
 window.flySim = {
-  map,
+  scene,
+  camera,
+  mapView,
+  THREE,
+  geoToWorld,
   aircraft,
   goToAirport,
   startFlight,
+  tilesReady,
   setLocalHour: (h) => {
     manualLocalHour = h;
     refreshLighting();
@@ -155,7 +152,6 @@ window.flySim = {
   },
   setCamMode: (m) => {
     camMode = m;
-    aircraftOverlay.setCamMode(m);
   },
   setAirborne: (altMeters = 1500, speedKt = 200) => {
     aircraft.onGround = false;
@@ -191,7 +187,7 @@ const flightSelect = setupFlightSelect(AIRPORTS, (plan) => {
 });
 
 // ---- 近地警告系统（GPWS）----
-const gpws = createGPWS(map, () => aircraft.state(), terrain);
+const gpws = createGPWS(null, () => aircraft.state(), terrain);
 let gpwsInfo = { level: 'none', aglHere: Infinity };
 let lastGpwsEval = 0;
 window.flySim.getGPWS = () => gpwsInfo;
@@ -206,22 +202,25 @@ function frame() {
   pollInput();
   aircraft.update(dt);
 
-  // 预取飞机正下方 DEM 瓦片，保证 AGL/相机高程查询命中
+  // 预取飞机正下方 DEM 瓦片，保证 AGL 查询命中
   terrain.prefetch(aircraft.lon, aircraft.lat);
 
   // 真实时间推进（未手动锁定时）
   if (manualLocalHour == null) simDate = new Date();
 
-  updateCamera();
-  aircraftOverlay.render();
+  // 飞机姿态写入共享场景 + 控制面动画
+  aircraftModel.update(aircraft.state(), dt);
 
-  // GPWS 评估（约每 250ms 一次，地形查询有开销），闪烁每帧更新
+  updateCamera();
+  renderer.render(scene, camera);
+
+  // GPWS 评估（约每 250ms 一次），闪烁每帧更新
   if (now - lastGpwsEval > 250) {
     gpwsInfo = gpws.evaluate();
     lastGpwsEval = now;
   }
   hud.update();
-  hud.setGPWS(gpwsInfo, now); // 须在 update 之后，避免 AGL 读数被重建覆盖
+  hud.setGPWS(gpwsInfo, now);
 
   // 导航小地图
   const ms = aircraft.state();
@@ -241,9 +240,8 @@ function frame() {
 
 // 初始光照 + 启动
 refreshLighting();
-// 光照随时间缓慢刷新（每 5 秒，避免每帧重算）
-setInterval(refreshLighting, 5000);
+setInterval(refreshLighting, 5000); // 随时间缓慢刷新
 updateCamera();
 requestAnimationFrame(frame);
 
-console.log('[flySim] 就绪。免费全球地形：AWS Terrarium DEM + Esri 影像（无需 token）');
+console.log('[flySim] 就绪。统一 three.js 场景 + geo-three 全球地形（AWS Terrarium DEM + Esri 影像，无需 token）');
