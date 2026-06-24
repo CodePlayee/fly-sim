@@ -52,13 +52,13 @@ function palette(sunAltDeg) {
       ambientLevel: 0.35,
     };
   }
-  // 夜晚
+  // 夜晚（保留少量月光环境光，使地形不至于纯黑）
   return {
     fog: '#0a0f1e',
-    sun: '#2a3a60',
-    ambient: '#1a2540',
-    ambientIntensity: 0.18,
-    sunIntensity: 0.15,
+    sun: '#6a7a9a',
+    ambient: '#2a3550',
+    ambientIntensity: 0.5,
+    sunIntensity: 0.4,
     turbidity: 0.5,
     rayleigh: 0.2,
     ambientLevel: 0.18,
