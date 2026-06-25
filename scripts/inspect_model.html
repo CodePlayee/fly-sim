@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><style>html,body{margin:0;background:#8aa0b8;overflow:hidden}</style></head>
+<head><meta charset="utf-8"><style>html,body{margin:0;background:#b8c4d0;overflow:hidden}</style></head>
 <body>
 <script type="module">
 import * as THREE from '/node_modules/three/build/three.module.js';
@@ -13,46 +13,52 @@ renderer.setPixelRatio(2);
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x8aa0b8);
-const camera = new THREE.PerspectiveCamera(35, W / H, 0.1, 2000);
+scene.background = new THREE.Color(0xb8c4d0);
+const camera = new THREE.PerspectiveCamera(32, W / H, 0.1, 4000);
 
-const sun = new THREE.DirectionalLight(0xffffff, 3.2);
-sun.position.set(30, 40, 60);
+const sun = new THREE.DirectionalLight(0xffffff, 2.8);
+sun.position.set(40, 60, 50);
 scene.add(sun);
-scene.add(new THREE.AmbientLight(0x99aabb, 1.1));
+const sun2 = new THREE.DirectionalLight(0xaaccff, 1.0);
+sun2.position.set(-40, -20, -40);
+scene.add(sun2);
+scene.add(new THREE.AmbientLight(0xaab8c8, 1.0));
+
+// 地面网格参照（看离地高度）
+const grid = new THREE.GridHelper(120, 24, 0x556677, 0x33414f);
+grid.position.z = -3.0; // 机身中线离地约 3m，grid 当地面
+grid.rotation.x = Math.PI / 2;
+scene.add(grid);
 
 const plane = buildBoeing737();
 scene.add(plane);
 
-// 偏转一点舵面以便检视贴合
-const c = plane.userData.controls;
-const DEG = Math.PI / 180;
-if (c.aileronL) c.aileronL.rotation.y = 12 * DEG;
-if (c.aileronR) c.aileronR.rotation.y = 12 * DEG;
-if (c.elevatorL) c.elevatorL.rotation.y = -10 * DEG;
-if (c.elevatorR) c.elevatorR.rotation.y = -10 * DEG;
-if (c.rudder) c.rudder.rotation.z = 14 * DEG;
-
-const D = 60;
-window.__setView = (v) => {
+const D = 58;
+const VIEWS = {
   // 机体: +X=机头, +Y=左翼, +Z=上
-  if (v === 'belly') {            // 仰视：相机在正下方(-Z)往上看机腹
-    camera.position.set(0, 0, -D);
-    camera.up.set(1, 0, 0);       // 机头朝画面上方
-  } else if (v === 'top') {       // 俯视：相机在正上方(+Z)往下看
-    camera.position.set(0, 0, D);
-    camera.up.set(1, 0, 0);
-  } else if (v === 'tail') {      // 尾视：相机在机尾后方(-X)
-    camera.position.set(-D, 0, 8);
-    camera.up.set(0, 0, 1);
-  } else {                        // 斜下方四分之三视角
-    camera.position.set(D * 0.6, -D * 0.5, -D * 0.35);
-    camera.up.set(0, 0, 1);
-  }
+  side:        { pos:[0, D, 0],        up:[0,0,1] },   // 正侧视（从左翼方向看）
+  'side-low':  { pos:[14, D*0.85, -8], up:[0,0,1] },   // 侧前下方
+  top:         { pos:[0, 0, D],        up:[1,0,0] },    // 俯视
+  belly:       { pos:[0, 0, -D],       up:[1,0,0] },    // 仰视
+  front:       { pos:[D, 0, 0],        up:[0,0,1] },    // 正前（机头朝镜头）
+  tail:        { pos:[-D, 0, 6],       up:[0,0,1] },    // 尾视
+  'q-front':   { pos:[D*0.7, D*0.55, D*0.35],  up:[0,0,1] }, // 前上四分之三
+  'q-rear':    { pos:[-D*0.6, D*0.6, D*0.35],  up:[0,0,1] }, // 后上四分之三
+  'eng-close': { pos:[22, 20, -6],     up:[0,0,1], fov:24 }, // 发动机特写
+  'nose-close':{ pos:[40, 12, 8],      up:[0,0,1], fov:22 }, // 机头特写
+};
+
+window.__setView = (v) => {
+  const cfg = VIEWS[v];
+  camera.fov = cfg.fov || 32;
+  camera.updateProjectionMatrix();
+  camera.position.set(...cfg.pos);
+  camera.up.set(...cfg.up);
   camera.lookAt(0, 0, 0);
   renderer.render(scene, camera);
 };
-window.__setView('belly');
+window.__views = Object.keys(VIEWS);
+window.__setView('side');
 window.__ready = true;
 </script>
 </body>

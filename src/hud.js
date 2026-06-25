@@ -96,6 +96,16 @@ export function setupHud(api, airports) {
   help.innerHTML = '↑↓ 俯仰 · ←→ 滚转 · W/S 油门 · A/D 方向舵 · V 视角';
   ctrl.appendChild(help);
 
+  // 当前视角提示（自由视角下提示鼠标操作）
+  const camLabel = document.createElement('div');
+  camLabel.style.cssText = 'margin-top:4px; font-size:11px; opacity:.85; color:#9fd0ff;';
+  ctrl.appendChild(camLabel);
+  const CAM_NAMES = { chase: '追尾', cockpit: '座舱', free: '自由（拖拽环绕 · 滚轮缩放）' };
+  function setCamMode(mode) {
+    camLabel.textContent = `视角：${CAM_NAMES[mode] || mode}`;
+  }
+  setCamMode('chase');
+
   // 航班横幅（顶部居中）：出发 -> 目的地
   const flightBar = document.createElement('div');
   flightBar.style.cssText = `
@@ -178,5 +188,5 @@ export function setupHud(api, airports) {
     nightOverlay.style.opacity = String(Math.max(0, Math.min(0.6, op)));
   }
 
-  return { update, setNightOverlay, setGPWS, setFlight };
+  return { update, setNightOverlay, setGPWS, setFlight, setCamMode };
 }

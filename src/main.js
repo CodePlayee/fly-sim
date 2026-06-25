@@ -42,20 +42,26 @@ function currentDate() {
   return simDate;
 }
 
-// ---- 相机：第三人称追尾 / 座舱（世界坐标直接放置）----
-let camMode = 'chase'; // chase | cockpit
+// ---- 相机：第三人称追尾 / 座舱 / 自由环绕（世界坐标直接放置）----
+let camMode = 'chase'; // chase | cockpit | free
 const _acPos = new THREE.Vector3();
+const _focus = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
 const _camPos = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
 
+// 自由相机：以飞机为中心的环绕轨道（方位角相对机头，跟随转弯）
+const orbit = { az: 0, el: 0.32, dist: 140, dragging: false, px: 0, py: 0 };
+const _right = new THREE.Vector3();
+const _offset = new THREE.Vector3();
+
 function updateCamera() {
   const s = aircraft.state();
-  geoToWorld(s.lat, s.lon, s.alt, _acPos); // 飞机世界位置
+  geoToWorld(s.lat, s.lon, s.alt, _acPos); // pivot 原点世界位置（座舱锚点）
   headingToForward(s.headingRad, _fwd); // 前向单位向量（北=-z）
 
   if (camMode === 'cockpit') {
-    // 座舱：机头前上方一点，朝飞行方向看
+    // 座舱：机头前上方一点，朝飞行方向看（贴 pivot 机头，不用几何中心）
     _camPos.copy(_acPos).addScaledVector(_fwd, 6);
     _camPos.y += 2;
     camera.position.copy(_camPos);
@@ -63,15 +69,33 @@ function updateCamera() {
     const look = _acPos.clone().addScaledVector(_fwd, 1000);
     look.y += 2;
     camera.lookAt(look);
+    return;
+  }
+
+  // 追尾 / 自由：对准飞机视觉中心（几何重心），保证机体真正居中。
+  aircraftModel.getVisualCenter(_focus);
+
+  if (camMode === 'free') {
+    // 自由环绕：方位角相对机头(0=正后方)，仰角抬升，距离可缩放。始终看向飞机。
+    _right.crossVectors(_fwd, _up).normalize();
+    const ch = Math.cos(orbit.az), sh = Math.sin(orbit.az);
+    // behindDir = -fwd 旋转 az：cos*(-fwd) + sin*right
+    _offset.copy(_fwd).multiplyScalar(-ch).addScaledVector(_right, sh);
+    const ce = Math.cos(orbit.el), se = Math.sin(orbit.el);
+    _offset.multiplyScalar(ce).addScaledVector(_up, se).multiplyScalar(orbit.dist);
+    _camPos.copy(_focus).add(_offset);
+    camera.position.copy(_camPos);
+    camera.up.set(0, 1, 0);
+    camera.lookAt(_focus);
   } else {
     // 追尾：机后上方，距离随高度（视觉舒适）
     const back = 120;
     const up = 42;
-    _camPos.copy(_acPos).addScaledVector(_fwd, -back);
+    _camPos.copy(_focus).addScaledVector(_fwd, -back);
     _camPos.y += up;
     camera.position.copy(_camPos);
     camera.up.set(0, 1, 0);
-    camera.lookAt(_acPos);
+    camera.lookAt(_focus);
   }
 }
 
@@ -83,14 +107,44 @@ function refreshLighting() {
 
 // ---- 键盘输入 ----
 const keys = new Set();
+const CAM_MODES = ['chase', 'cockpit', 'free'];
 window.addEventListener('keydown', (e) => {
   keys.add(e.code);
   if (e.code === 'KeyV') {
-    camMode = camMode === 'chase' ? 'cockpit' : 'chase';
+    camMode = CAM_MODES[(CAM_MODES.indexOf(camMode) + 1) % CAM_MODES.length];
+    hud.setCamMode && hud.setCamMode(camMode);
   }
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
+
+// ---- 自由相机：鼠标拖拽环绕 + 滚轮缩放（仅 free 模式生效）----
+function setupFreeCameraControls() {
+  const el = renderer.domElement;
+  el.addEventListener('mousedown', (e) => {
+    if (camMode !== 'free' || e.button !== 0) return;
+    orbit.dragging = true;
+    orbit.px = e.clientX;
+    orbit.py = e.clientY;
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!orbit.dragging) return;
+    const dx = e.clientX - orbit.px;
+    const dy = e.clientY - orbit.py;
+    orbit.px = e.clientX;
+    orbit.py = e.clientY;
+    orbit.az -= dx * 0.006; // 左右拖动绕飞机旋转
+    orbit.el = Math.max(-1.2, Math.min(1.45, orbit.el + dy * 0.006)); // 上下拖动改仰角
+  });
+  window.addEventListener('mouseup', () => { orbit.dragging = false; });
+  el.addEventListener('wheel', (e) => {
+    if (camMode !== 'free') return;
+    e.preventDefault();
+    orbit.dist = Math.max(25, Math.min(2000, orbit.dist * (1 + Math.sign(e.deltaY) * 0.12)));
+  }, { passive: false });
+  // 自由模式下光标提示可拖拽
+  el.style.cursor = 'default';
+}
 
 function pollInput() {
   const i = aircraft.input;
@@ -241,6 +295,7 @@ function frame() {
 // 初始光照 + 启动
 refreshLighting();
 setInterval(refreshLighting, 5000); // 随时间缓慢刷新
+setupFreeCameraControls();
 updateCamera();
 requestAnimationFrame(frame);
 

@@ -232,6 +232,7 @@ export class Aircraft {
       lon: this.lon,
       lat: this.lat,
       alt: this.alt,
+      fieldElevation: this.fieldElevation,
       headingDeg: (this.heading / DEG) % 360,
       pitchDeg: this.pitch / DEG,
       rollDeg: this.roll / DEG,

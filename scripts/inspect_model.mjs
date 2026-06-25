@@ -11,18 +11,18 @@ const browser = await puppeteer.launch({
   args: ['--no-sandbox', '--use-gl=angle', '--ignore-gpu-blocklist', '--enable-webgl'],
 });
 const page = await browser.newPage();
-await page.setViewport({ width: 900, height: 760, deviceScaleFactor: 2 });
+await page.setViewport({ width: 1000, height: 640, deviceScaleFactor: 2 });
 
 const url = 'http://127.0.0.1:5273/scripts/inspect_model.html';
 await page.goto(url, { waitUntil: 'networkidle0' });
 await page.waitForFunction('window.__ready === true', { timeout: 15000 });
 
-const views = ['belly', 'top', 'tail', 'three-quarter'];
+const views = await page.evaluate(() => window.__views);
 for (const v of views) {
   await page.evaluate((view) => window.__setView(view), v);
-  await new Promise((r) => setTimeout(r, 300));
+  await new Promise((r) => setTimeout(r, 250));
   await page.screenshot({ path: path.join(root, `shots/model-${v}.png`) });
   console.log('shot', v);
 }
 await browser.close();
-console.log('done');
+console.log('done', views.length);

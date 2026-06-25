@@ -22,8 +22,14 @@ export function createAircraftModel(scene) {
   scene.add(pivot);
   const ctl = plane.userData.controls || {};
 
-  // 控制面平滑状态 + 风扇转角累计
-  const surf = { ail: 0, elev: 0, rud: 0, fanAngle: 0 };
+  // 模型视觉中心相对 pivot 原点的偏移（模型本地坐标）。
+  // 重构后机身前后/上下不对称（尾椎、垂尾更长更高），几何中心并不在 pivot 原点；
+  // 相机应对准此中心而非原点，飞机才真正居中。在初始姿态(identity)下测量一次即可。
+  plane.updateMatrixWorld(true);
+  const centerOffset = new THREE.Box3().setFromObject(plane).getCenter(new THREE.Vector3());
+
+  // 控制面平滑状态 + 风扇转角累计 + 起落架收放进度
+  const surf = { ail: 0, elev: 0, rud: 0, fanAngle: 0, gear: 1, steer: 0, spoiler: 0 };
 
   // 固定基变换：模型本地(+X机头,+Y左翼,+Z上) -> 世界(北=-Z,东=+X,上=+Y)。
   // 航向 0（朝北）时机头应指向 -Z：
@@ -110,11 +116,39 @@ export function createAircraftModel(scene) {
     surf.fanAngle += rps * Math.PI * 2 * dt;
     if (ctl.fanL) ctl.fanL.rotation.x = surf.fanAngle;
     if (ctl.fanR) ctl.fanR.rotation.x = surf.fanAngle;
+
+    // ---- 起落架收放：在地面或低空(<150m AGL 近似用 alt-fieldElev 不可得，用低高度/低速)时放下 ----
+    // 规则：地面 -> 放下；离地且爬升超过阈值高度 -> 收起。带迟滞避免抖动。
+    const agl = s.alt != null && s.fieldElevation != null ? s.alt - s.fieldElevation : (s.alt || 0);
+    const wantGear = s.onGround || agl < 120 ? 1 : 0;
+    surf.gear += (wantGear - surf.gear) * Math.min(dt * 0.8, 1); // 收放约 1~2s
+    if (ctl.setGear) ctl.setGear(surf.gear);
+
+    // ---- 前轮转向：仅地面、随方向舵指令 ----
+    const steerCmd = s.onGround ? clampUnit(yawCmd) : 0;
+    surf.steer += (steerCmd * (35 * DEG) - surf.steer) * k; // 最大 ±35°
+    if (ctl.noseSteer) ctl.noseSteer.rotation.z = surf.steer;
+
+    // ---- 扰流板/减速板：地面 + 收油门时展开（着陆减速/滑行）----
+    const wantSpoiler = s.onGround && (s.throttle || 0) < 0.2 && (s.speedKt || 0) > 30 ? 1 : 0;
+    surf.spoiler += (wantSpoiler - surf.spoiler) * Math.min(dt * 4, 1);
+    const SPOIL_MAX = 55 * DEG;
+    if (ctl.spoilerL) ctl.spoilerL.rotation.y = -surf.spoiler * SPOIL_MAX; // 上掀
+    if (ctl.spoilerR) ctl.spoilerR.rotation.y = -surf.spoiler * SPOIL_MAX;
   }
 
   function clampUnit(v) {
     return Math.max(-1, Math.min(1, v));
   }
 
-  return { update, pivot, plane, getLastState: () => lastState };
+  // 飞机视觉中心的世界坐标（pivot 原点 + 随姿态旋转的几何中心偏移）。
+  // 相机用它对准飞机，保证模型几何重心居中而非 pivot 原点。
+  const _center = new THREE.Vector3();
+  function getVisualCenter(out) {
+    pivot.updateMatrixWorld();
+    out.copy(_center.copy(centerOffset)).applyMatrix4(pivot.matrixWorld);
+    return out;
+  }
+
+  return { update, pivot, plane, getVisualCenter, getLastState: () => lastState };
 }
