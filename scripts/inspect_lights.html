@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><style>html,body{margin:0;background:#05080f;overflow:hidden}</style></head>
+<body>
+<script type="module">
+import * as THREE from '/node_modules/three/build/three.module.js';
+import { buildBoeing737 } from '/src/boeing737.js';
+
+const W = window.innerWidth, H = window.innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(W, H);
+renderer.setPixelRatio(2);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05080f); // 夜空
+
+// 仅极弱环境光，模拟夜间——让灯光自身发光成为主角
+scene.add(new THREE.AmbientLight(0x223044, 0.25));
+const moon = new THREE.DirectionalLight(0x99aacc, 0.25);
+moon.position.set(-30, 40, -20);
+scene.add(moon);
+
+// 地面网格参照
+const grid = new THREE.GridHelper(140, 28, 0x223344, 0x162233);
+grid.position.z = -3.0;
+grid.rotation.x = Math.PI / 2;
+scene.add(grid);
+
+const plane = buildBoeing737();
+scene.add(plane);
+const ctl = plane.userData.controls || {};
+
+// 驱动灯光：night 开关 + 模拟飞行参数（地面/低空/巡航）
+let _phase = 'cruise';
+window.__setPhase = (p) => { _phase = p; };
+function driveLights(tMs) {
+  if (!ctl.lights) return;
+  const cfg = {
+    ground: { agl: 0, onGround: true },
+    lowapproach: { agl: 200, onGround: false },
+    cruise: { agl: 3000, onGround: false },
+    day: null,
+  }[_phase];
+  if (cfg === null) { ctl.lights.update({ night: false }); return; }
+  ctl.lights.update({ night: true, tMs, agl: cfg.agl, onGround: cfg.onGround });
+}
+
+const D = 58;
+const VIEWS = {
+  side:        { pos:[0, D, 0],        up:[0,0,1] },
+  top:         { pos:[0, 0, D],        up:[1,0,0] },
+  belly:       { pos:[0, 0, -D],       up:[1,0,0] },
+  front:       { pos:[D, 0, 0],        up:[0,0,1] },
+  tail:        { pos:[-D, 0, 6],       up:[0,0,1] },
+  'q-front':   { pos:[D*0.7, D*0.55, D*0.35],  up:[0,0,1] },
+  'q-rear':    { pos:[-D*0.6, D*0.6, D*0.35],  up:[0,0,1] },
+  'wingtipL':  { pos:[2, 26, 6], look:[0,16,0], up:[0,0,1], fov:26 },
+};
+
+window.__setView = (v) => {
+  const cfg = VIEWS[v];
+  camera.fov = cfg.fov || 32;
+  camera.updateProjectionMatrix();
+  camera.position.set(...cfg.pos);
+  camera.up.set(...cfg.up);
+  camera.lookAt(...(cfg.look || [0,0,0]));
+};
+const camera = new THREE.PerspectiveCamera(32, W / H, 0.1, 4000);
+
+// 渲染某时刻（tMs 控制闪烁相位），可指定视角
+window.__renderAt = (v, tMs) => {
+  driveLights(tMs);
+  window.__setView(v);
+  renderer.render(scene, camera);
+};
+window.__views = Object.keys(VIEWS);
+window.__ready = true;
+</script>
+</body>
+</html>

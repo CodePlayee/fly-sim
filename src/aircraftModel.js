@@ -62,8 +62,9 @@ export function createAircraftModel(scene) {
    * @param s { lon,lat,alt, headingRad|headingDeg, pitchDeg, rollDeg,
    *            inPitch,inRoll,inYaw,throttle }
    * @param dt 秒（用于控制面/风扇平滑）
+   * @param env { night, tMs } 夜间灯光驱动（可选）
    */
-  function update(s, dt) {
+  function update(s, dt, env) {
     if (!s) return;
     lastState = s;
 
@@ -95,6 +96,18 @@ export function createAircraftModel(scene) {
 
     // ---- 控制面 / 风扇 ----
     animateControls(s, dt || 0);
+
+    // ---- 外部灯光（夜间开启）----
+    if (ctl.lights && env) {
+      const agl = s.alt != null && s.fieldElevation != null
+        ? s.alt - s.fieldElevation : (s.alt || 0);
+      ctl.lights.update({
+        night: !!env.night,
+        tMs: env.tMs || 0,
+        agl,
+        onGround: !!s.onGround,
+      });
+    }
   }
 
   // 控制面 / 风扇动画：根据操纵指令与姿态平滑偏转

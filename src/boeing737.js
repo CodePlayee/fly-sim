@@ -270,6 +270,14 @@ export function buildBoeing737() {
   };
   controls.setGear(1);
 
+  // =========================================================================
+  // 外部灯光（夜间开启）：航行灯/防撞信标/频闪/着陆灯。
+  // =========================================================================
+  controls.lights = buildExteriorLights(plane, M, {
+    WING, FUS_R, CYL_FRONT, CYL_BACK, TAIL_LEN, GROUND_Z,
+    wingLEAt,
+  });
+
   plane.updateMatrixWorld(true);
   return plane;
 }
@@ -648,3 +656,165 @@ function makeMainGear(M, drop) {
   group.add(wheels);
   return { group };
 }
+
+// ===========================================================================
+// 外部灯光系统
+// ===========================================================================
+
+/** 生成一张径向渐变的圆形光晕贴图（中心亮、边缘透明），供 Sprite 用。 */
+let _glowTex = null;
+function glowTexture() {
+  if (_glowTex) return _glowTex;
+  const s = 64;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = s;
+  const ctx = cv.getContext('2d');
+  const g = ctx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.25, 'rgba(255,255,255,0.65)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, s, s);
+  _glowTex = new THREE.CanvasTexture(cv);
+  return _glowTex;
+}
+
+/**
+ * 单盏灯：一个小发光球(core) + 一个加法混合光晕(halo Sprite)。
+ * 返回 { group, set(on,intensity) }。set 控制亮灭与强度（0~1）。
+ */
+function makeLamp(color, coreR = 0.12, haloScale = 1.6) {
+  const group = new THREE.Group();
+  const col = new THREE.Color(color);
+  const coreMat = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 1 });
+  const core = new THREE.Mesh(new THREE.SphereGeometry(coreR, 8, 8), coreMat);
+  group.add(core);
+
+  const haloMat = new THREE.SpriteMaterial({
+    map: glowTexture(),
+    color: col,
+    transparent: true,
+    opacity: 0.9,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const halo = new THREE.Sprite(haloMat);
+  halo.scale.setScalar(haloScale);
+  group.add(halo);
+
+  function set(on, intensity = 1) {
+    const k = on ? intensity : 0;
+    group.visible = k > 0.01;
+    coreMat.opacity = Math.min(1, k * 1.2);
+    haloMat.opacity = 0.9 * k;
+    halo.scale.setScalar(haloScale * (0.7 + 0.3 * k));
+  }
+  set(false);
+  return { group, set };
+}
+
+/**
+ * 在机体上布置全部外部灯，返回 { update(opts) }。
+ * 颜色与位置依据真实客机：
+ *   航行灯  左翼尖红 / 右翼尖绿 / 尾椎白（夜间常亮）
+ *   防撞信标 机身上+下 红（夜间闪烁，慢）
+ *   频闪灯  两翼尖 + 尾椎 白（高频双闪）
+ *   着陆灯  翼根前缘 + 机头 白（低空/地面，含 SpotLight 前射光锥）
+ */
+function buildExteriorLights(plane, M, P) {
+  const { WING, FUS_R, CYL_FRONT, CYL_BACK, TAIL_LEN, GROUND_Z, wingLEAt } = P;
+  const lamps = { nav: [], beacon: [], strobe: [], landing: [] };
+
+  // ---- 翼尖坐标（plane 局部）：用前缘后掠公式求翼尖前缘 x，叠加上反高度 ----
+  const tipY = WING.span;
+  const dihed = THREE.MathUtils.degToRad(WING.dihedral);
+  // 翼尖前缘 x（含后掠），略偏前缘放灯
+  const tipLEx = wingLEAt(tipY);
+  const tipZ = WING.rootZ + Math.sin(dihed) * tipY; // 上反抬升
+  for (const side of [1, -1]) {
+    const y = side * tipY;
+    // 航行灯：左(+Y, side=1)红、右(-Y, side=-1)绿。靠前缘、翼尖。
+    const nav = makeLamp(side === 1 ? 0xff2222 : 0x22ff44, 0.1, 1.3);
+    nav.group.position.set(tipLEx - 0.1, y, tipZ);
+    plane.add(nav.group);
+    lamps.nav.push(nav);
+    // 频闪：白，翼尖（与航行灯同位略后）
+    const st = makeLamp(0xffffff, 0.1, 1.8);
+    st.group.position.set(tipLEx - 0.4, y, tipZ);
+    plane.add(st.group);
+    lamps.strobe.push(st);
+  }
+
+  // ---- 尾椎航行灯(白) + 尾频闪(白) ----
+  const tailX = CYL_BACK - TAIL_LEN * 0.92;
+  const tailZ = FUS_R * 0.2;
+  const tailNav = makeLamp(0xffffff, 0.1, 1.3);
+  tailNav.group.position.set(tailX, 0, tailZ);
+  plane.add(tailNav.group);
+  lamps.nav.push(tailNav);
+  const tailStrobe = makeLamp(0xffffff, 0.11, 1.9);
+  tailStrobe.group.position.set(tailX + 0.05, 0, tailZ);
+  plane.add(tailStrobe.group);
+  lamps.strobe.push(tailStrobe);
+
+  // ---- 防撞信标(红)：机身顶 + 机腹，闪烁 ----
+  const beaconTop = makeLamp(0xff3010, 0.13, 1.8);
+  beaconTop.group.position.set(WING.rootX + 0.5, 0, FUS_R * 1.02);
+  plane.add(beaconTop.group);
+  lamps.beacon.push(beaconTop);
+  const beaconBot = makeLamp(0xff3010, 0.13, 1.8);
+  beaconBot.group.position.set(WING.rootX + 0.5, 0, -FUS_R * 1.02);
+  plane.add(beaconBot.group);
+  lamps.beacon.push(beaconBot);
+
+  // ---- 着陆/滑行灯(白)：翼根前缘两侧 + 机头下方，带 SpotLight 真实前射光锥 ----
+  const landGeoms = [
+    { x: wingLEAt(WING.rootY + 1.5) - 0.1, y: WING.rootY + 1.2, z: WING.rootZ },
+    { x: wingLEAt(WING.rootY + 1.5) - 0.1, y: -(WING.rootY + 1.2), z: WING.rootZ },
+    { x: CYL_FRONT - 0.4, y: 0, z: -FUS_R * 0.9 }, // 机头/前起落架附近
+  ];
+  for (const g of landGeoms) {
+    const lp = makeLamp(0xfff4e0, 0.14, 2.0);
+    lp.group.position.set(g.x, g.y, g.z);
+    plane.add(lp.group);
+    // SpotLight：朝机头前方(+X)、略下俯，照亮前方
+    const spot = new THREE.SpotLight(0xfff0d8, 0, 600, Math.PI / 7, 0.4, 1.2);
+    spot.position.set(g.x, g.y, g.z);
+    const tgt = new THREE.Object3D();
+    tgt.position.set(g.x + 200, g.y, g.z - 30); // 前下方
+    plane.add(tgt);
+    spot.target = tgt;
+    plane.add(spot);
+    lamps.landing.push({ lamp: lp, spot });
+  }
+
+  // ---- 逐帧驱动 ----
+  // opts: { night(bool), agl(米), onGround(bool), tMs(时间 ms 用于闪烁) }
+  let _spin = 0;
+  function update(opts) {
+    const night = !!opts.night;
+    const t = opts.tMs || 0;
+    // 航行灯：夜间常亮
+    for (const l of lamps.nav) l.set(night, 1);
+
+    // 防撞信标：夜间慢速旋转闪（约 0.7s 周期的脉冲）
+    _spin = (t / 1000) % 1;
+    const beaconPulse = Math.pow(Math.max(0, Math.sin(t * 0.006)), 8); // 尖脉冲
+    for (const l of lamps.beacon) l.set(night, beaconPulse);
+
+    // 频闪：夜间高频双闪（每 ~1.2s 来一组两下白闪）
+    const cyc = (t % 1200) / 1200;
+    const flash = (cyc < 0.04 || (cyc > 0.10 && cyc < 0.14)) ? 1 : 0;
+    for (const l of lamps.strobe) l.set(night, flash);
+
+    // 着陆灯：夜间且低空(<450m AGL)或地面时亮，SpotLight 同步给强度
+    const landOn = night && (opts.onGround || (opts.agl != null && opts.agl < 450));
+    for (const { lamp, spot } of lamps.landing) {
+      lamp.set(landOn, 1);
+      spot.intensity = landOn ? 800 : 0;
+    }
+  }
+  update({ night: false });
+  return { update, lamps };
+}
+

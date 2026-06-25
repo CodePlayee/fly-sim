@@ -100,8 +100,10 @@ function updateCamera() {
 }
 
 // ---- 光照刷新 ----
+let currentSunAltDeg = 90; // 缓存最新太阳高度角，供逐帧灯光昼夜判定
 function refreshLighting() {
   const info = applyLighting(env, currentDate(), aircraft.lon, aircraft.lat);
+  if (info) currentSunAltDeg = info.sunAltDeg;
   hud.setNightOverlay(info ? info.sunAltDeg : 90);
 }
 
@@ -265,8 +267,11 @@ function frame() {
   // 真实时间推进（未手动锁定时）
   if (manualLocalHour == null) simDate = new Date();
 
-  // 飞机姿态写入共享场景 + 控制面动画
-  aircraftModel.update(aircraft.state(), dt);
+  // 飞机姿态写入共享场景 + 控制面动画 + 外部灯光（夜间开启）
+  aircraftModel.update(aircraft.state(), dt, {
+    night: currentSunAltDeg < -3, // 暮光起即开灯
+    tMs: now,
+  });
 
   updateCamera();
   renderer.render(scene, camera);

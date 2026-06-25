@@ -116,6 +116,22 @@ scripts/
 始终是最近物体，应永远在前景，无需与地形做深度合成或地理投影，更稳健。
 模型受光与 SunCalc 计算的太阳方位/高度同步。
 
+## 外部灯光（夜间开启）
+
+`boeing737.js` 的 `buildExteriorLights` 按真实客机布置外部灯（发光球 core +
+加法混合光晕 halo；着陆灯另含 SpotLight 前射光锥），由 `aircraftModel` 每帧驱动，
+**白天全灭、暮光起（太阳高度角 < −3°）开启**：
+
+| 灯种 | 位置 | 颜色 | 时机 |
+|------|------|------|------|
+| 航行灯 nav | 左翼尖 / 右翼尖 / 尾椎 | 红 / 绿 / 白 | 夜间常亮 |
+| 防撞信标 beacon | 机身顶 + 机腹 | 红 | 夜间脉冲闪 |
+| 频闪 strobe | 两翼尖 + 尾椎 | 白 | 夜间高频双闪 |
+| 着陆/滑行灯 landing | 翼根前缘×2 + 机头 | 白 | 夜间且地面 / 低空(<450m AGL) |
+
+昼夜判定来自 `main.js` 缓存的 `currentSunAltDeg`（SunCalc 实时计算），逐帧以
+`{night,tMs,agl,onGround}` 传入 `aircraftModel.update`。检视：`scripts/inspect_lights.*`。
+
 ## 飞行动力学
 
 `aircraft.js` 是一套**点质量 + 姿态的简化 6-DOF**飞行模型（"街机增强"档），
