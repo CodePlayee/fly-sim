@@ -24,5 +24,15 @@ for (const v of views) {
   await page.screenshot({ path: path.join(root, `shots/model-${v}.png`) });
   console.log('shot', v);
 }
+
+// 偏转控制面后，再出关键几张（俯视/前视/后视）检视后缘分段与铰链动作
+await page.evaluate(() => window.__deflect(true));
+for (const v of ['top', 'front', 'tail', 'q-rear', 'htail-close']) {
+  await page.evaluate((view) => window.__setView(view), v);
+  await new Promise((r) => setTimeout(r, 250));
+  await page.screenshot({ path: path.join(root, `shots/model-${v}-deflect.png`) });
+  console.log('shot', v, 'deflect');
+}
+
 await browser.close();
 console.log('done', views.length);

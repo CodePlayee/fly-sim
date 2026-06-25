@@ -33,6 +33,25 @@ scene.add(grid);
 const plane = buildBoeing737();
 scene.add(plane);
 
+// 手动驱动控制面以检视后缘分段与偏转（与 aircraftModel.js 的真实动画同号）
+window.__deflect = (on) => {
+  const c = plane.userData.controls || {};
+  const D = Math.PI / 180;
+  const ail = on ? 16 * D : 0;
+  const elev = on ? 14 * D : 0;
+  const flap = on ? 30 * D : 0;
+  // 副翼差动：左右反号（镜像不翻转 rotation.y 竖直方向，反号=差动）
+  if (c.aileronL) c.aileronL.rotation.y = -ail;
+  if (c.aileronR) c.aileronR.rotation.y = ail;
+  // 升降舵同步：左右同号（俯仰，两侧同向）
+  if (c.elevatorL) c.elevatorL.rotation.y = elev;
+  if (c.elevatorR) c.elevatorR.rotation.y = elev;
+  // 襟翼：两侧对称下偏
+  if (c.flapL) c.flapL.rotation.y = -flap;
+  if (c.flapR) c.flapR.rotation.y = -flap;
+  if (c.rudder) c.rudder.rotation.z = on ? 22 * D : 0; // 方向舵偏转（偏航）
+};
+
 const D = 58;
 const VIEWS = {
   // 机体: +X=机头, +Y=左翼, +Z=上
@@ -46,6 +65,7 @@ const VIEWS = {
   'q-rear':    { pos:[-D*0.6, D*0.6, D*0.35],  up:[0,0,1] }, // 后上四分之三
   'eng-close': { pos:[22, 20, -6],     up:[0,0,1], fov:24 }, // 发动机特写
   'nose-close':{ pos:[40, 12, 8],      up:[0,0,1], fov:22 }, // 机头特写
+  'htail-close':{ pos:[-30, 14, 9], look:[-17, 0, 2], up:[0,0,1], fov:30 }, // 平尾/升降舵特写
 };
 
 window.__setView = (v) => {
@@ -54,7 +74,8 @@ window.__setView = (v) => {
   camera.updateProjectionMatrix();
   camera.position.set(...cfg.pos);
   camera.up.set(...cfg.up);
-  camera.lookAt(0, 0, 0);
+  const t = cfg.look || [0, 0, 0];
+  camera.lookAt(...t);
   renderer.render(scene, camera);
 };
 window.__views = Object.keys(VIEWS);

@@ -148,7 +148,8 @@ function setupFreeCameraControls() {
 
 function pollInput() {
   const i = aircraft.input;
-  i.pitch = (keys.has('ArrowDown') ? 1 : 0) - (keys.has('ArrowUp') ? 1 : 0);
+  // ↑=拉杆抬头(+1)，↓=推杆低头(-1)。与 aircraft.js 约定 input.pitch>0=抬头 一致。
+  i.pitch = (keys.has('ArrowUp') ? 1 : 0) - (keys.has('ArrowDown') ? 1 : 0);
   i.roll = (keys.has('ArrowRight') ? 1 : 0) - (keys.has('ArrowLeft') ? 1 : 0);
   i.yaw = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
   i.throttleDelta =

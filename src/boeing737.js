@@ -9,6 +9,7 @@ import * as THREE from 'three';
  *
  * 可动部件通过 plane.userData.controls 暴露，供 aircraftModel.js 按飞行状态做动画：
  *   aileronL / aileronR    副翼（差动，随滚转）           —— rotation.y
+ *   flapL / flapR          内段襟翼（起降放下）            —— rotation.y
  *   elevatorL / elevatorR  升降舵（随俯仰）               —— rotation.y
  *   rudder                 方向舵（随偏航/转弯）           —— rotation.z
  *   fanL / fanR            发动机风扇（随油门旋转）         —— rotation.x
@@ -154,14 +155,17 @@ export function buildBoeing737() {
   for (const side of [1, -1]) {
     const w = makeWing(WING, M, {
       winglet: true,
-      aileronSpan: [11.5, 15.2],
+      segments: [
+        { type: 'flap',    span: [2.2, 9.5],   cf: 0.30 }, // 内段后缘襟翼
+        { type: 'aileron', span: [10.5, 14.8], cf: 0.26 }, // 外段后缘副翼
+      ],
+      flapFairings: { span: [2.6, 9.2], cf: 0.30, count: 4 }, // 襟翼滑轨整流罩
       spoilerSpan: [5.5, 10.0],
     });
-    w.group.scale.y = side;
-    w.group.position.set(WING.rootX, side * WING.rootY, WING.rootZ);
+    mountWing(w, side, WING, WING.rootX, WING.rootY, WING.rootZ);
     plane.add(w.group);
-    if (side === 1) { controls.aileronL = w.aileron; controls.spoilerL = w.spoiler; }
-    else { controls.aileronR = w.aileron; controls.spoilerR = w.spoiler; }
+    if (side === 1) { controls.aileronL = w.aileron; controls.flapL = w.flap; controls.spoilerL = w.spoiler; }
+    else { controls.aileronR = w.aileron; controls.flapR = w.flap; controls.spoilerR = w.spoiler; }
   }
   // 翼根整流（wing-body fairing）：贴机腹与翼根之间
   {
@@ -171,23 +175,26 @@ export function buildBoeing737() {
   }
 
   // =========================================================================
-  // 发动机（CFM56）：吊挂于翼下，明显前伸到机翼前缘之前。
+  // 发动机（CFM56）：吊挂于翼下，短舱跨过当地机翼前缘（进气口前伸、尾喷在翼下）。
   // =========================================================================
-  // 翼前缘在翼根处的 x（1/4 弦定位法：rootX 是 1/4 弦，前缘 = rootX + rootChord*0.25）
-  const wingLE_root = WING.rootX + WING.rootChord * 0.25;
+  // 机翼前缘在 plane 坐标随展向后掠：LE(y)=rootX + rootChord/2 - tan(sweep)*|y|
+  const wingLEAt = (y) =>
+    WING.rootX + WING.rootChord * 0.5 - Math.tan(THREE.MathUtils.degToRad(WING.sweepLE)) * Math.abs(y);
+  const ENG_Y = 5.6;                       // 发动机横向站位
+  const engLE = wingLEAt(ENG_Y);           // 该站位的当地前缘 x
   for (const side of [1, -1]) {
     const eng = makeEngine(M);
-    const y = side * 5.6;       // 横向：离机身中线
-    // 短舱中心：前伸到翼前缘之前；吊在翼下、底部高于地面（中心-R > GROUND_Z）
-    eng.group.position.set(wingLE_root + 2.6, y, WING.rootZ - 0.55);
+    const y = side * ENG_Y;
+    // 短舱中心略前于当地前缘：进气口前伸约 2m，尾喷落在翼下。吊在翼下、高于地面。
+    eng.group.position.set(engLE - 0.3, y, WING.rootZ - 0.35);
     eng.group.scale.y = side;
     plane.add(eng.group);
     if (side === 1) controls.fanL = eng.fan; else controls.fanR = eng.fan;
 
-    // 吊挂(pylon)：从短舱顶斜接到翼前缘下方
-    const pylon = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.32, 1.0), M.nacelle);
-    pylon.position.set(wingLE_root + 1.4, y, WING.rootZ - 0.3);
-    pylon.rotation.y = 0.18;
+    // 吊挂(pylon)：从短舱顶斜接到当地翼前缘下方（短粗，紧贴翼下）
+    const pylon = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.3, 0.7), M.nacelle);
+    pylon.position.set(engLE + 0.2, y, WING.rootZ + 0.05);
+    pylon.rotation.y = 0.1;
     plane.add(pylon);
   }
 
@@ -197,11 +204,14 @@ export function buildBoeing737() {
   const HTAIL = { span: 6.2, rootChord: 3.6, tipChord: 1.2, sweepLE: 28, dihedral: 6,
     rootX: CYL_BACK - TAIL_LEN * 0.55, rootZ: FUS_R * 0.55, rootY: FUS_R * 0.3 };
   for (const side of [1, -1]) {
-    const t = makeWing(HTAIL, M, { winglet: false, aileronSpan: [0.5, 5.7], spoilerSpan: null });
-    t.group.scale.y = side;
-    t.group.position.set(HTAIL.rootX, side * HTAIL.rootY, HTAIL.rootZ);
+    const t = makeWing(HTAIL, M, {
+      winglet: false,
+      segments: [{ type: 'elevator', span: [0.5, 5.7], cf: 0.34 }],
+      spoilerSpan: null,
+    });
+    mountWing(t, side, HTAIL, HTAIL.rootX, HTAIL.rootY, HTAIL.rootZ);
     plane.add(t.group);
-    if (side === 1) controls.elevatorL = t.aileron; else controls.elevatorR = t.aileron;
+    if (side === 1) controls.elevatorL = t.elevator; else controls.elevatorR = t.elevator;
   }
   {
     const vt = makeVerticalTail(M);
@@ -265,9 +275,17 @@ export function buildBoeing737() {
 }
 
 /**
- * 后掠梯形翼。返回 { group, aileron, spoiler }。
+ * 后掠梯形翼。返回 { group, surfaces, aileron, flap, elevator, spoiler }。
  * 局部坐标：x=弦向(+前 -后)，y=展向(0=翼根)，z=厚度(向上)。
  * 翼面用 1/4 弦后掠定位：前缘随展向后移 tan(sweepLE)*y。
+ *
+ * 关键：后缘操纵面（襟翼/副翼/升降舵）不再是"挂在满弦翼后的悬浮薄板"，而是
+ * 把固定翼面的后缘在各操纵面展向区间**向前切出凹槽**(notch)，操纵面恰好嵌入凹槽、
+ * 铰链在凹槽前沿、后端齐平真后缘。这样俯视后缘是分段精细的（与真机一致），
+ * 且操纵面绕铰链偏转时凹槽露出、外形连续。
+ *
+ * opt.segments: [{ type:'flap'|'aileron'|'elevator', span:[y1,y2], cf }]
+ *   cf = 操纵面弦 / 当地弦长（0~1），铰链线 = 真后缘前移 cf*当地弦。
  */
 function makeWing(P, M, opt) {
   const { span, rootChord, tipChord, sweepLE, dihedral } = P;
@@ -281,55 +299,95 @@ function makeWing(P, M, opt) {
 
   const leAt = (y) => leRootX + (leTipX - leRootX) * (y / span);
   const teAt = (y) => teRootX + (teTipX - teRootX) * (y / span);
+  const chordAt = (y) => leAt(y) - teAt(y);
+  // 某操纵面在展向 y 处的铰链 x（真后缘前移 cf*当地弦）
+  const hingeAt = (y, cf) => teAt(y) + cf * chordAt(y);
 
-  // 操纵面占后缘弦的比例
-  const ctrlFrac = 0.26;
-  // 固定翼面后缘 = 真后缘 + ctrlFrac*弦（即把后 ctrlFrac 留给操纵面区间内，区间外仍是满弦）
-  // 简化：固定翼面用满外形，操纵面以薄板叠在后缘上方/对齐，避免外挂碎块——
-  // 这里固定翼面用满外形，操纵面区间内在后缘"内嵌"切口由操纵面板补齐。
   const WING_TH = 0.34;
+  const thickFrac = (y) => 1 - 0.5 * (y / span); // 翼尖减薄系数
+  // 展向局部厚度（用于操纵面/扰流板贴合）
+  const halfThickAt = (y) => (WING_TH / 2) * thickFrac(y);
 
-  // 固定翼面外形（满梯形）
+  // 操纵面区间（按展向从外到内排序，便于沿后缘走线切凹槽）
+  const segments = (opt.segments || []).slice().sort((a, b) => b.span[1] - a.span[1]);
+
+  // ---- 固定翼面外形：前缘 + 翼尖 + 带凹槽的后缘 ----
   const shape = new THREE.Shape();
-  shape.moveTo(leRootX, 0);
-  shape.lineTo(teRootX, 0);
-  shape.lineTo(teTipX, span);
-  shape.lineTo(leTipX, span);
+  shape.moveTo(leRootX, 0);          // 翼根前缘
+  shape.lineTo(leTipX, span);        // 前缘到翼尖
+  shape.lineTo(teTipX, span);        // 翼尖后缘（满弦）
+  // 后缘自翼尖向翼根回走，遇操纵面区间则前移到铰链线形成凹槽
+  for (const sgmt of segments) {
+    const [y1, y2] = sgmt.span;
+    shape.lineTo(teAt(y2), y2);             // 区间外端：真后缘
+    shape.lineTo(hingeAt(y2, sgmt.cf), y2); // 前移到铰链（凹槽外壁）
+    shape.lineTo(hingeAt(y1, sgmt.cf), y1); // 沿铰链线到内端
+    shape.lineTo(teAt(y1), y1);             // 退回真后缘（凹槽内壁）
+  }
+  shape.lineTo(teRootX, 0);           // 翼根后缘
   shape.closePath();
+
   const geo = new THREE.ExtrudeGeometry(shape, { depth: WING_TH, bevelEnabled: false });
   geo.translate(0, 0, -WING_TH / 2);
-  // 翼尖减薄（前后缘收拢 + z 减薄）
+  // 翼尖减薄（z 减薄）
   {
     const p = geo.attributes.position;
     for (let i = 0; i < p.count; i++) {
-      const yy = p.getY(i);
-      p.setZ(i, p.getZ(i) * (1 - 0.5 * (yy / span)));
+      p.setZ(i, p.getZ(i) * thickFrac(p.getY(i)));
     }
     p.needsUpdate = true; geo.computeVertexNormals();
   }
   g.add(new THREE.Mesh(geo, M.wing));
 
-  // 后缘操纵面（副翼/升降舵）：贴合后缘的梯形薄板，铰链在后缘线
-  let aileron = null;
-  if (opt.aileronSpan) {
-    const [y1, y2] = opt.aileronSpan;
+  // ---- 后缘操纵面：嵌入各自凹槽，铰链在凹槽前沿(x=0)，绕 +Y 偏转 ----
+  const surfaces = {};
+  for (const sgmt of segments) {
+    const [y1, y2] = sgmt.span;
     const ymid = (y1 + y2) / 2;
-    const half = (y2 - y1) / 2;
-    const chord = Math.max(0.7, rootChord * ctrlFrac);
-    aileron = new THREE.Group();
-    aileron.position.set(teAt(ymid), ymid, 0);
-    const slope = (teAt(y2) - teAt(y1)) / (y2 - y1);
+    const hx = hingeAt(ymid, sgmt.cf); // 铰链中点 x（作为子组原点，rotation.y 绕此处的 +Y）
+    const grp = new THREE.Group();
+    grp.position.set(hx, ymid, 0);
+    // 梯形面：前沿沿铰链线，后沿齐真后缘；相对子组原点
     const s = new THREE.Shape();
-    // 局部：x=0 铰链(后缘)，向后(-x)延伸 chord；y 相对 ymid
-    s.moveTo(slope * (-half), -half);
-    s.lineTo(slope * (half), half);
-    s.lineTo(slope * (half) - chord, half);
-    s.lineTo(slope * (-half) - chord, -half);
+    s.moveTo(hingeAt(y1, sgmt.cf) - hx, y1 - ymid); // 前内
+    s.lineTo(hingeAt(y2, sgmt.cf) - hx, y2 - ymid); // 前外
+    s.lineTo(teAt(y2) - hx, y2 - ymid);             // 后外
+    s.lineTo(teAt(y1) - hx, y1 - ymid);             // 后内
     s.closePath();
-    const sg = new THREE.ExtrudeGeometry(s, { depth: WING_TH * 0.7, bevelEnabled: false });
-    sg.translate(0, 0, -WING_TH * 0.35);
-    aileron.add(new THREE.Mesh(sg, M.ctrl));
-    g.add(aileron);
+    const th = halfThickAt(ymid) * 2 * 0.92;
+    const sg = new THREE.ExtrudeGeometry(s, { depth: th, bevelEnabled: false });
+    sg.translate(0, 0, -th / 2);
+    grp.add(new THREE.Mesh(sg, M.ctrl));
+    g.add(grp);
+    surfaces[sgmt.type] = grp; // 同型多段时取最后一段（本模型每型单段）
+  }
+
+  // 襟翼滑轨整流罩（flap track fairings，737 标志性"独木舟"鼓包）：
+  // 沿襟翼后缘下方等距分布，跨铰链线前后延伸，向后伸出真后缘、向下鼓出。
+  if (opt.flapFairings) {
+    const { span: fsp, cf, count } = opt.flapFairings;
+    const [fy1, fy2] = fsp;
+    for (let i = 0; i < count; i++) {
+      const y = fy1 + (fy2 - fy1) * ((i + 0.5) / count);
+      const hx = hingeAt(y, cf);
+      const teX = teAt(y);
+      const len = (hx - teX) + 0.7;            // 跨铰链前 + 略伸出后缘
+      const cx = (hx + 0.4) - len / 2;         // 中心：略前于铰链
+      const fair = new THREE.Group();
+      const zBot = -halfThickAt(y) - 0.16;     // 鼓出在翼下
+      fair.position.set(cx, y, zBot);
+      // 流线鼓包：拉长椭球压扁成"独木舟"
+      const body = new THREE.Mesh(new THREE.SphereGeometry(0.5, 12, 8), M.wing);
+      body.scale.set(len / 1.0, 0.4, 0.46);
+      fair.add(body);
+      // 尾椎（向后收尖，钝短地伸出后缘）
+      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.7, 12), M.wing);
+      tip.rotation.z = Math.PI / 2;            // 尖朝 -X(后)
+      tip.position.set(-len / 2 + 0.05, 0, 0);
+      tip.scale.set(1, 0.8, 0.62);
+      fair.add(tip);
+      g.add(fair);
+    }
   }
 
   // 上表面扰流板：贴翼上表面的薄板，铰链在板前缘，向上掀。
@@ -341,7 +399,7 @@ function makeWing(P, M, opt) {
     const sp = y2 - y1;
     const chord = 0.9;
     // 该展向位置的翼面上表面高度（考虑翼尖减薄），面板略嵌入以消除悬浮缝
-    const topZ = (WING_TH / 2) * (1 - 0.5 * (ymid / span)) - 0.04;
+    const topZ = halfThickAt(ymid) - 0.04;
     spoiler = new THREE.Group();
     spoiler.position.set(teAt(ymid) + chord, ymid, topZ);
     const panel = new THREE.Mesh(new THREE.BoxGeometry(chord, sp * 0.8, 0.05), M.wing);
@@ -374,26 +432,58 @@ function makeWing(P, M, opt) {
   }
 
   g.rotation.x = THREE.MathUtils.degToRad(-dihedral); // 上反
-  return { group: g, aileron, spoiler };
+  return {
+    group: g,
+    surfaces,
+    aileron: surfaces.aileron || null,
+    flap: surfaces.flap || null,
+    elevator: surfaces.elevator || null,
+    spoiler,
+  };
 }
 
-/** 垂直尾翼（后掠 + 蓝涂装 + 背鳍），含可绕 Z 偏转的方向舵 */
+// 把翼面安装到机体：先镜像(scale.y)，再施加随侧别翻转的上反角，使左右对称。
+// 注意：dihedral 必须随 side 翻转，否则被 scale.y=-1 镜像后两翼会一上一下。
+function mountWing(w, side, P, posX, posY, posZ) {
+  w.group.scale.y = side;
+  // makeWing 内部已设 g.rotation.x=-dihedral（针对未镜像的左翼为正确上反）。
+  // 镜像侧需把该旋转翻正，故整体改由此处按 side 设定，覆盖内部值。
+  w.group.rotation.x = THREE.MathUtils.degToRad(P.dihedral) * side;
+  w.group.position.set(posX, side * posY, posZ);
+}
+
+/** 垂直尾翼（后掠 + 蓝涂装 + 背鳍），方向舵嵌入鳍后缘凹槽、绕 Z 偏转 */
 function makeVerticalTail(M) {
   const g = new THREE.Group();
   const H = 7.0;
+  const TH = 0.26;
+  // 鳍前/后缘随高度的 x（底→顶）：前缘 3.0→1.3，后缘 -1.8→-0.6
+  const leAt = (z) => 3.0 + (1.3 - 3.0) * (z / H);
+  const teAt = (z) => -1.8 + (-0.6 - (-1.8)) * (z / H);
+  const chordAt = (z) => leAt(z) - teAt(z);
+  // 方向舵：占后缘 cf 弦、自 z1 到 z2
+  const rCf = 0.30;
+  const z1 = H * 0.04, z2 = H * 0.86;
+  const hingeAt = (z) => teAt(z) + rCf * chordAt(z);
+
+  // 固定鳍外形（shape: x=弦, y=高度）：前缘 + 顶 + 带凹槽后缘 + 底
   const shape = new THREE.Shape();
-  shape.moveTo(3.0, 0);
-  shape.lineTo(-1.8, 0);
-  shape.lineTo(-0.6, H);
-  shape.lineTo(1.3, H);
+  shape.moveTo(leAt(0), 0);     // 底前缘
+  shape.lineTo(leAt(H), H);     // 前缘到顶
+  shape.lineTo(teAt(H), H);     // 顶后缘（满弦）
+  shape.lineTo(teAt(z2), z2);   // 后缘下行到方向舵顶
+  shape.lineTo(hingeAt(z2), z2);// 前移到铰链（凹槽）
+  shape.lineTo(hingeAt(z1), z1);// 沿铰链线下行
+  shape.lineTo(teAt(z1), z1);   // 退回真后缘
+  shape.lineTo(teAt(0), 0);     // 底后缘
   shape.closePath();
-  const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.26, bevelEnabled: false });
-  geo.translate(0, 0, -0.13);
+
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: TH, bevelEnabled: false });
+  geo.translate(0, 0, -TH / 2);
   {
     const p = geo.attributes.position;
     for (let i = 0; i < p.count; i++) {
-      const yy = p.getY(i);
-      p.setZ(i, p.getZ(i) * (1 - 0.45 * (yy / H)));
+      p.setZ(i, p.getZ(i) * (1 - 0.45 * (p.getY(i) / H)));
     }
     p.needsUpdate = true; geo.computeVertexNormals();
   }
@@ -413,23 +503,31 @@ function makeVerticalTail(M) {
   dorsal.rotation.x = Math.PI / 2;
   g.add(dorsal);
 
-  // 方向舵：铰接鳍后缘，绕 Z 偏转。蓝色涂装（与鳍一体），贴合后掠后缘。
-  // 鳍后缘：底(z=0)在 x=-1.8，顶(z=H)在 x=-0.6。铰链取中部高度的后缘 x。
+  // 方向舵：嵌入凹槽，铰链在凹槽前沿，绕模型 +Z(竖轴) 偏转 -> 偏航。
+  const zmid = (z1 + z2) / 2;
+  const hx = hingeAt(zmid);
   const rudder = new THREE.Group();
-  const hingeZ = H * 0.46;
-  const teX = -1.8 + (-0.6 - (-1.8)) * (hingeZ / H); // 该高度后缘 x
-  rudder.position.set(teX, 0, hingeZ);
-  const rChord = 0.9, rHeight = H * 0.82;
-  const surf = new THREE.Mesh(new THREE.BoxGeometry(rChord, 0.16, rHeight), M.accent);
-  surf.position.set(-rChord / 2, 0, 0);
-  // 顶端略缩（贴合鳍尖收拢）
+  rudder.position.set(hx, 0, zmid);
+  // 舵面外形（shape: x=弦, y=高度），相对 rudder 原点
+  const rs = new THREE.Shape();
+  rs.moveTo(hingeAt(z1) - hx, z1 - zmid); // 前下
+  rs.lineTo(hingeAt(z2) - hx, z2 - zmid); // 前上
+  rs.lineTo(teAt(z2) - hx, z2 - zmid);    // 后上
+  rs.lineTo(teAt(z1) - hx, z1 - zmid);    // 后下
+  rs.closePath();
+  const rg = new THREE.ExtrudeGeometry(rs, { depth: TH * 0.92, bevelEnabled: false });
+  rg.translate(0, 0, -TH * 0.46);
+  // 顶端略减薄（贴合鳍尖收拢）
   {
-    const p = surf.geometry.attributes.position;
+    const p = rg.attributes.position;
     for (let i = 0; i < p.count; i++) {
-      if (p.getZ(i) > 0) p.setX(i, p.getX(i) * 0.6); // 上端弦缩短
+      const zz = zmid + p.getY(i);
+      p.setZ(i, p.getZ(i) * (1 - 0.45 * (zz / H)));
     }
-    p.needsUpdate = true; surf.geometry.computeVertexNormals();
+    p.needsUpdate = true; rg.computeVertexNormals();
   }
+  const surf = new THREE.Mesh(rg, M.accent);
+  surf.rotation.x = Math.PI / 2; // 与鳍同样把 shape-y(高度)→模型 +Z
   rudder.add(surf);
   g.add(rudder);
 

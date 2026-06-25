@@ -8,6 +8,12 @@
  * 朝向：模型本地坐标 +X=机头、+Y=左翼、+Z=上。
  * 世界坐标：北=-Z、东=+X、上=+Y（见 geoUtils）。
  * 用 qBasis 把模型本地基底映射到世界基底，再叠加 heading/pitch/roll。
+ *
+ * 姿态轴（在 qBasis 之后用模型本地轴叠加，三轴互相垂直、互不耦合）：
+ *   俯仰 pitch 绕横轴(左翼 +Y) —— 抬头时机头抬向机顶；
+ *   横滚 roll  绕纵轴(机头 +X) —— 右滚时右翼下沉；
+ *   航向 heading 绕世界竖轴 +Y。
+ * 注意：曾把 pitch 误绕 +X(机头)→表现为横滚、roll 误绕 +Z(竖直)→表现为偏航，已修正。
  */
 import * as THREE from 'three';
 import { buildBoeing737 } from './boeing737.js';
@@ -29,7 +35,7 @@ export function createAircraftModel(scene) {
   const centerOffset = new THREE.Box3().setFromObject(plane).getCenter(new THREE.Vector3());
 
   // 控制面平滑状态 + 风扇转角累计 + 起落架收放进度
-  const surf = { ail: 0, elev: 0, rud: 0, fanAngle: 0, gear: 1, steer: 0, spoiler: 0 };
+  const surf = { ail: 0, elev: 0, rud: 0, fanAngle: 0, gear: 1, steer: 0, spoiler: 0, flap: 0 };
 
   // 固定基变换：模型本地(+X机头,+Y左翼,+Z上) -> 世界(北=-Z,东=+X,上=+Y)。
   // 航向 0（朝北）时机头应指向 -Z：
@@ -73,11 +79,12 @@ export function createAircraftModel(scene) {
     // 航向：绕世界 +Y 旋转。航向增大=顺时针(从上看)=朝东偏。
     // 机头默认指 -Z(北)，绕 +Y 转 -heading 使其朝正确方位。
     _qHeading.setFromAxisAngle(_axisY, -heading);
-    // 俯仰：绕机体横轴（世界系中，航向后的左右轴）。先把基础朝向定了再叠加。
-    // 用机体局部轴更直观：pitch 绕模型左翼轴、roll 绕机头轴。
-    // 这里在 qBasis 之后用局部轴叠加：
-    _qPitch.setFromAxisAngle(new THREE.Vector3(-1, 0, 0), pitch); // 抬头为正
-    _qRoll.setFromAxisAngle(new THREE.Vector3(0, 0, -1), roll); //  右压杆右翼下沉
+    // pitch/roll 在 qBasis 之后用「模型本地轴」叠加（机头+X，左翼+Y，机顶+Z）：
+    //   俯仰 = 绕横轴(左翼 Y) 旋转；横滚 = 绕纵轴(机头 X) 旋转。
+    //   抬头(pitch>0)：机头 +X 抬向机顶 +Z -> 绕 +Y 负向；故用 (0,-1,0)·pitch。
+    //   右滚(roll>0)：右翼(-Y)下沉 -> 绕机头 +X 正向；故用 (1,0,0)·roll。
+    _qPitch.setFromAxisAngle(new THREE.Vector3(0, -1, 0), pitch);
+    _qRoll.setFromAxisAngle(new THREE.Vector3(1, 0, 0), roll);
 
     // 组合：world = heading ∘ basis ∘ (roll ∘ pitch)
     pivot.quaternion
@@ -106,10 +113,15 @@ export function createAircraftModel(scene) {
     surf.elev += (clampUnit(pitchCmd) * MAXDEF - surf.elev) * k;
     surf.rud += (clampUnit(yawCmd) * MAXDEF - surf.rud) * k;
 
-    if (ctl.aileronL) ctl.aileronL.rotation.y = surf.ail;
+    // 副翼差动（横滚）：经数值探针实测，子组 rotation.y>0 -> 后缘上偏。
+    // 关键：父级 scale.y=±1 镜像 *不会* 翻转子组 rotation.y 的竖直方向，
+    // 故「左右同号=同步、左右反号=差动」。副翼要差动 -> 取反号。
+    // 右滚(surf.ail>0)：左副翼下偏、右副翼上偏 -> 右翼下沉 -> 向右滚转。
+    if (ctl.aileronL) ctl.aileronL.rotation.y = -surf.ail;
     if (ctl.aileronR) ctl.aileronR.rotation.y = surf.ail;
-    if (ctl.elevatorL) ctl.elevatorL.rotation.y = -surf.elev;
-    if (ctl.elevatorR) ctl.elevatorR.rotation.y = -surf.elev;
+    // 升降舵同步（俯仰）：要两侧同向 -> 同号。抬头(surf.elev>0)：两侧后缘均上偏。
+    if (ctl.elevatorL) ctl.elevatorL.rotation.y = surf.elev;
+    if (ctl.elevatorR) ctl.elevatorR.rotation.y = surf.elev;
     if (ctl.rudder) ctl.rudder.rotation.z = surf.rud;
 
     const rps = 2 + (s.throttle || 0) * 26;
@@ -123,6 +135,14 @@ export function createAircraftModel(scene) {
     const wantGear = s.onGround || agl < 120 ? 1 : 0;
     surf.gear += (wantGear - surf.gear) * Math.min(dt * 0.8, 1); // 收放约 1~2s
     if (ctl.setGear) ctl.setGear(surf.gear);
+
+    // ---- 襟翼：起降构型放下（与起落架同逻辑：地面/低空放下，巡航收起）----
+    // 模型上 rotation.y 为正=后缘上偏；襟翼后缘向下偏，故取负角。
+    const wantFlap = s.onGround || agl < 600 ? 1 : 0;
+    surf.flap += (wantFlap - surf.flap) * Math.min(dt * 0.6, 1); // 襟翼动作较慢
+    const FLAP_MAX = 30 * DEG;
+    if (ctl.flapL) ctl.flapL.rotation.y = -surf.flap * FLAP_MAX;
+    if (ctl.flapR) ctl.flapR.rotation.y = -surf.flap * FLAP_MAX;
 
     // ---- 前轮转向：仅地面、随方向舵指令 ----
     const steerCmd = s.onGround ? clampUnit(yawCmd) : 0;
