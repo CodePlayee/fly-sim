@@ -19,7 +19,7 @@ const aircraft = new Aircraft(currentAirport);
 
 // ---- 统一 three.js 世界（场景原点平移到起始机场，避免浮点抖动）----
 setOrigin(currentAirport.lat, currentAirport.lon);
-const { renderer, scene, camera, mapView } = createWorld();
+const { renderer, scene, camera, mapView, syncSize } = createWorld();
 
 // ---- 光照装置（Sky 穹顶 + 平行光 + 环境光 + 雾）----
 const env = setupSky(scene);
@@ -252,6 +252,8 @@ function frame() {
   const now = performance.now();
   const dt = Math.min((now - last) / 1000, 0.1);
   last = now;
+
+  syncSize(); // 每帧自愈画布尺寸/相机比例，防止进入游戏后画面偏移
 
   pollInput();
   aircraft.update(dt);

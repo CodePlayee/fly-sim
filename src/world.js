@@ -18,9 +18,11 @@ export function createWorld() {
     logarithmicDepthBuffer: true, // 近飞机 + 远地形 共存，避免 z-fighting
   });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.domElement.style.cssText = 'position:fixed; inset:0; z-index:0;';
+  // CSS 全权控制显示尺寸（铺满视口）；缓冲区尺寸由 syncSize 对齐 canvas 实际显示尺寸。
+  renderer.domElement.style.cssText = 'position:fixed; inset:0; width:100%; height:100%; z-index:0;';
   document.body.appendChild(renderer.domElement);
+  // 初始按显示尺寸设置缓冲区（false=不写内联 width/height，避免与 CSS inset:0 冲突）
+  renderer.setSize(renderer.domElement.clientWidth, renderer.domElement.clientHeight, false);
 
   // ---- 场景 ----
   const scene = new THREE.Scene();
@@ -28,7 +30,7 @@ export function createWorld() {
   // ---- 相机（近 1m 看清飞机，远 5000km 看远山）----
   const camera = new THREE.PerspectiveCamera(
     60,
-    window.innerWidth / window.innerHeight,
+    renderer.domElement.clientWidth / renderer.domElement.clientHeight,
     1,
     5_000_000
   );
@@ -51,11 +53,24 @@ export function createWorld() {
   scene.add(mapView);
 
   // ---- resize ----
-  window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
+  // 每帧调用 syncSize：以 canvas 的实际显示尺寸(clientWidth/Height)为准对齐缓冲区与
+  // 相机比例。这样无论初始化时 innerWidth 是否稳定、DPR/缩放如何变化，下一帧自动校正，
+  // 从根本上避免「画面偏移、需手动 resize 才正」的问题。setSize 传 false 不改内联样式。
+  function syncSize() {
+    const cv = renderer.domElement;
+    const w = cv.clientWidth, h = cv.clientHeight;
+    if (w === 0 || h === 0) return;
+    const pr = renderer.getPixelRatio();
+    if (cv.width !== Math.floor(w * pr) || cv.height !== Math.floor(h * pr)) {
+      renderer.setSize(w, h, false);
+    }
+    const aspect = w / h;
+    if (Math.abs(camera.aspect - aspect) > 1e-4) {
+      camera.aspect = aspect;
+      camera.updateProjectionMatrix();
+    }
+  }
+  window.addEventListener('resize', syncSize);
 
-  return { renderer, scene, camera, mapView };
+  return { renderer, scene, camera, mapView, syncSize };
 }
