@@ -40,3 +40,42 @@ export const AIRPORTS = {
 };
 
 export const DEFAULT_AIRPORT = 'VHHH';
+
+/** 内置 3 机场的 ICAO（即时可用 + 离线兜底）。 */
+export const BUILTIN_KEYS = Object.keys(AIRPORTS);
+
+/**
+ * 运行时机场注册表：初始为内置 3 个，动态搜索到的机场并入此表，
+ * 供 hud / minimap / main 统一按 ICAO 引用。
+ */
+export const REGISTRY = { ...AIRPORTS };
+
+/**
+ * 把数据层机场 record 规范成统一字段契约。
+ * @param record dataSource 返回的 {icao,iata,name,city,country,lat,lon,elevation,timezone}
+ * @param runwayHeading 真跑道航向（度）；为 null 时回退（朝北）
+ */
+export function makeAirport(record, runwayHeading) {
+  const heading = (runwayHeading != null && Number.isFinite(runwayHeading))
+    ? runwayHeading : 0;
+  return {
+    icao: record.icao || record.iata || '????',
+    iata: record.iata || '',
+    name: record.name || record.city || record.icao || '机场',
+    city: record.city || record.name || '',
+    country: record.country || '',
+    lon: record.lon,
+    lat: record.lat,
+    elevation: Number.isFinite(record.elevation) ? record.elevation : 0,
+    runwayHeading: heading,
+    timezone: Number.isFinite(record.timezone)
+      ? record.timezone : Math.round((record.lon || 0) / 15),
+  };
+}
+
+/** 把机场并入运行时注册表（按 ICAO 去重，已存在则保留原有手工校准值）。 */
+export function registerAirport(ap) {
+  if (!ap || !ap.icao) return ap;
+  if (!REGISTRY[ap.icao]) REGISTRY[ap.icao] = ap;
+  return REGISTRY[ap.icao];
+}

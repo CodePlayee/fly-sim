@@ -54,11 +54,11 @@ function palette(sunAltDeg) {
   }
   // 夜晚（保留少量月光环境光，使地形不至于纯黑）
   return {
-    fog: '#0a0f1e',
-    sun: '#6a7a9a',
-    ambient: '#2a3550',
-    ambientIntensity: 0.5,
-    sunIntensity: 0.4,
+    fog: '#0a1024',
+    sun: '#8c9ec4',
+    ambient: '#33405e',
+    ambientIntensity: 0.62,
+    sunIntensity: 0.55,
     turbidity: 0.5,
     rayleigh: 0.2,
     ambientLevel: 0.18,
@@ -149,8 +149,36 @@ export function applyLighting(env, date, lon, lat) {
     env.scene.fog.far = sunAltDeg > 0 ? 180000 : 90000;
   }
 
-  return { sunAltDeg, useMoon, azimuth, polar, ambient: pal.ambientLevel };
+  // ---- 月亮方向（独立于光照天体，供天空渲染月亮精灵）----
+  const moonAzDeg = (180 + (moon.azimuth * 180) / Math.PI + 360) % 360;
+  const moonPolar = (90 - (moon.altitude * 180) / Math.PI) * DEG;
+  const moonAz = moonAzDeg * DEG;
+  const sinMP = Math.sin(moonPolar);
+  const moonDir = new THREE.Vector3(
+    sinMP * Math.sin(moonAz),
+    Math.cos(moonPolar),
+    -sinMP * Math.cos(moonAz)
+  );
+  const illum = SunCalc.getMoonIllumination(date);
+
+  // 夜间因子：0=白天/暮光，1=完全黑夜。用于星空/月亮淡入与背景压暗。
+  const night = clampN((-4 - sunAltDeg) / 10, 0, 1);
+
+  return {
+    sunAltDeg,
+    useMoon,
+    azimuth,
+    polar,
+    ambient: pal.ambientLevel,
+    night,
+    moonDir,
+    moonAltDeg: (moon.altitude * 180) / Math.PI,
+    moonPhase: illum.phase, // 0=新月,0.5=满月,1=新月
+    moonFraction: illum.fraction, // 被照亮比例
+  };
 }
+
+function clampN(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 /** 把"机场当地某钟点"换算为 UTC Date */
 export function localHourToDate(airport, localHour, baseDate = new Date()) {

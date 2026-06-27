@@ -11,7 +11,9 @@
     "shot": "node scripts/screenshot.mjs"
   },
   "dependencies": {
+    "@mapbox/vector-tile": "^3.0.0",
     "geo-three": "^0.1.15",
+    "pbf": "^5.1.0",
     "suncalc": "^1.9.0",
     "three": "^0.169.0"
   },

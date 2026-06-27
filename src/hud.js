@@ -1,6 +1,8 @@
 /**
  * 简易 HUD：左上仪表盘 + 右上机场/时间控制。
  */
+import { BUILTIN_KEYS } from './airports.js';
+
 export function setupHud(api, airports) {
   const wrap = document.createElement('div');
   wrap.style.cssText = `
@@ -48,10 +50,12 @@ export function setupHud(api, airports) {
     border-radius:8px; pointer-events:auto; backdrop-filter:blur(4px);`;
   wrap.appendChild(ctrl);
 
-  // 机场按钮
+  // 机场按钮（内置 3 个快捷 + 换机场打开全球搜索）
   const apRow = document.createElement('div');
   apRow.style.marginBottom = '8px';
-  for (const icao of Object.keys(airports)) {
+  const builtin = BUILTIN_KEYS || ['VHHH', 'KSFO', 'LFPG'];
+  for (const icao of builtin.slice(0, 3)) {
+    if (!airports[icao]) continue;
     const b = document.createElement('button');
     b.textContent = icao;
     b.style.cssText = `margin-right:6px; padding:4px 8px; cursor:pointer;
@@ -59,7 +63,35 @@ export function setupHud(api, airports) {
     b.onclick = () => api.goToAirport(icao);
     apRow.appendChild(b);
   }
+  // 换机场：重新打开航班选择（全球在线搜索）
+  const moreBtn = document.createElement('button');
+  moreBtn.textContent = '✈ 换机场';
+  moreBtn.style.cssText = `padding:4px 8px; cursor:pointer;
+    background:#1d4570; color:#cfe8ff; border:1px solid #3a6ea5; border-radius:4px;`;
+  moreBtn.onclick = () => api.openFlightSelect && api.openFlightSelect();
+  apRow.appendChild(moreBtn);
   ctrl.appendChild(apRow);
+
+  // 时间加速倍率（循环档位）
+  const SPEEDS = [1, 2, 5, 10, 25, 50, 100];
+  let speedIdx = 0;
+  const speedBtn = document.createElement('button');
+  speedBtn.style.cssText = `margin-bottom:8px; padding:4px 10px; cursor:pointer; display:block;
+    width:100%; font-variant-numeric:tabular-nums; text-align:left;
+    background:#16324f; color:#cfe8ff; border:1px solid #2c5a8a; border-radius:4px;`;
+  function renderSpeed() {
+    const s = SPEEDS[speedIdx];
+    speedBtn.textContent = `⏩ 速率 ${s}×` + (s > 1 ? '（点击调整）' : '（实时）');
+    speedBtn.style.borderColor = s > 1 ? '#e0a83a' : '#2c5a8a';
+    speedBtn.style.background = s > 1 ? '#3a3014' : '#16324f';
+  }
+  speedBtn.onclick = () => {
+    speedIdx = (speedIdx + 1) % SPEEDS.length;
+    api.setTimeScale(SPEEDS[speedIdx]);
+    renderSpeed();
+  };
+  renderSpeed();
+  ctrl.appendChild(speedBtn);
 
   // 时间滑块
   const timeLabel = document.createElement('div');
@@ -179,13 +211,14 @@ export function setupHud(api, airports) {
     gpwsBanner.style.opacity = blinkOn ? '1' : '0.55';
   }
 
-  // 根据太阳高度角设置夜间压暗强度
+  // 夜间压暗：仅做极轻微的对比压暗（真实的暗部已由天空渐变+地面光照+雾负责，
+  // 这里若过强会把星空/月亮/城市灯一起压黑，故大幅削弱）。
   function setNightOverlay(sunAltDeg) {
     let op = 0;
-    if (sunAltDeg <= -10) op = 0.55;
-    else if (sunAltDeg <= -2) op = 0.35 - (sunAltDeg + 10) * 0.025;
-    else if (sunAltDeg <= 6) op = Math.max(0, (6 - sunAltDeg) * 0.02);
-    nightOverlay.style.opacity = String(Math.max(0, Math.min(0.6, op)));
+    if (sunAltDeg <= -10) op = 0.18;
+    else if (sunAltDeg <= -2) op = 0.18 * (1 - (sunAltDeg + 10) / 8 * 0.5);
+    else if (sunAltDeg <= 6) op = Math.max(0, (6 - sunAltDeg) * 0.01);
+    nightOverlay.style.opacity = String(Math.max(0, Math.min(0.2, op)));
   }
 
   return { update, setNightOverlay, setGPWS, setFlight, setCamMode };

@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { createWorld } from './world.js';
-import { setOrigin, geoToWorld, headingToForward } from './geoUtils.js';
+import { setOrigin, getOrigin, geoToWorld, headingToForward } from './geoUtils.js';
 import { applyLighting, localHourToDate, setupSky } from './lighting.js';
-import { AIRPORTS, DEFAULT_AIRPORT } from './airports.js';
+import { AIRPORTS, DEFAULT_AIRPORT, REGISTRY, registerAirport } from './airports.js';
 import { Aircraft } from './aircraft.js';
 import { setupHud } from './hud.js';
 import { createAircraftModel } from './aircraftModel.js';
@@ -10,6 +10,11 @@ import { createGPWS } from './gpws.js';
 import { setupMinimap } from './minimap.js';
 import { setupFlightSelect } from './flightSelect.js';
 import { createTerrain } from './terrain.js';
+import { setupLoadingMap } from './loadingMap.js';
+import { setupSkybox } from './skybox.js';
+import { setupCityLights } from './cityLights.js';
+import { createVectorTileSource } from './providers/VectorTileSource.js';
+import { setupCityNetwork } from './cityNetwork.js';
 
 const DEG = Math.PI / 180;
 
@@ -24,12 +29,22 @@ const { renderer, scene, camera, mapView, syncSize } = createWorld();
 // ---- 光照装置（Sky 穹顶 + 平行光 + 环境光 + 雾）----
 const env = setupSky(scene);
 
+// ---- 夜空增强（星空 + 月亮 + 地平线暮光渐变）----
+const skybox = setupSkybox(scene, camera);
+
 // ---- 程序化 737 模型（进共享场景）----
 const aircraftModel = createAircraftModel(scene);
 
 // ---- 地形高程查询器（自解码 Terrarium DEM，供 AGL/GPWS）----
 // 注意：geo-three 负责"视觉"地形；AGL 数字仍用 terrain.js（准、不依赖 LOD 加载态）。
 const terrain = createTerrain({ maxZoom: 14 });
+
+// ---- 城市灯光（夜间在城区叠加暖色发光精灵）----
+const cityLights = setupCityLights(scene, terrain, REGISTRY);
+
+// ---- 真实 OSM 矢量瓦片城市灯网（路网/建筑/跑道/水体，AGL 2000–8000m，带 LOD）----
+const vtSource = createVectorTileSource({ cacheSize: 600, maxConcurrent: 10 });
+const cityNetwork = setupCityNetwork(scene, terrain, vtSource);
 
 // 当前时间状态（可被时间滑块覆盖）
 let simDate = new Date();
@@ -44,6 +59,7 @@ function currentDate() {
 
 // ---- 相机：第三人称追尾 / 座舱 / 自由环绕（世界坐标直接放置）----
 let camMode = 'chase'; // chase | cockpit | free
+let timeScale = 1; // 时间加速倍率（1=实时，最大 100）
 const _acPos = new THREE.Vector3();
 const _focus = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
@@ -101,9 +117,10 @@ function updateCamera() {
 
 // ---- 光照刷新 ----
 let currentSunAltDeg = 90; // 缓存最新太阳高度角，供逐帧灯光昼夜判定
+let lightInfo = null;      // 缓存最新光照信息（含月亮/夜间因子），供天空/城市灯逐帧用
 function refreshLighting() {
   const info = applyLighting(env, currentDate(), aircraft.lon, aircraft.lat);
-  if (info) currentSunAltDeg = info.sunAltDeg;
+  if (info) { currentSunAltDeg = info.sunAltDeg; lightInfo = info; }
   hud.setNightOverlay(info ? info.sunAltDeg : 90);
 }
 
@@ -160,10 +177,26 @@ function pollInput() {
 }
 
 // ---- 机场切换 ----
-function goToAirport(icao) {
-  currentAirport = AIRPORTS[icao];
+// 接受 ICAO 字符串或机场对象。切换出发机场时**必须重设场景原点并重定位 mapView**，
+// 否则远机场的墨卡托世界坐标(~1e7 米)会引发单精度浮点抖动。
+function goToAirport(icaoOrAirport) {
+  let ap = typeof icaoOrAirport === 'string'
+    ? (REGISTRY[icaoOrAirport] || AIRPORTS[icaoOrAirport])
+    : icaoOrAirport;
+  if (!ap) return;
+  if (typeof icaoOrAirport !== 'string') registerAirport(ap);
+  currentAirport = ap;
+
+  // 原点平移到新机场 + 同步 mapView 位置（与 world.js 初始化一致）。
+  setOrigin(ap.lat, ap.lon);
+  const o = getOrigin();
+  mapView.position.set(-o.x, 0, o.y);
+  mapView.updateMatrixWorld(true);
+
   aircraft.reset(currentAirport);
   if (typeof minimap !== 'undefined') minimap.reset(); // 清空航迹
+  if (typeof cityLights !== 'undefined') cityLights.rebuild(ap.lat, ap.lon); // 重建附近城市灯
+  if (typeof cityNetwork !== 'undefined') cityNetwork.reset(); // 清空矢量灯网（origin 变）
   refreshLighting();
 }
 
@@ -173,6 +206,8 @@ function startFlight({ depIcao, dest }) {
   currentFlight = { depIcao, dest };
   minimap.setFlightPlan(dest); // dest 含 lon/lat/iata 等
   hud.setFlight && hud.setFlight(depIcao, dest);
+  // 地形加载过渡层：覆盖 2D 航图，地形就绪后渐隐
+  if (typeof loadingMap !== 'undefined') loadingMap.show(currentAirport, dest);
 }
 
 // ---- tilesReady：地形是否就绪（替代 MapLibre areTilesLoaded）----
@@ -182,6 +217,12 @@ const _down = new THREE.Vector3(0, -1, 0);
 const _startTime = performance.now();
 function tilesReady() {
   if (performance.now() - _startTime > 6000) return true; // 兜底超时
+  return terrainLoadedHere();
+}
+
+// 当前机场正下方地形是否已加载（纯 raycast，无全局超时——供加载过渡层判定，
+// 否则页面开启 6s 后换机场会让过渡层立即消失）。
+function terrainLoadedHere() {
   geoToWorld(aircraft.lat, aircraft.lon, 0, _acPos);
   _ray.set(new THREE.Vector3(_acPos.x, 1e6, _acPos.z), _down);
   return _ray.intersectObject(mapView, true).length > 0;
@@ -210,6 +251,13 @@ window.flySim = {
   setCamMode: (m) => {
     camMode = m;
   },
+  setTimeScale: (s) => {
+    timeScale = Math.max(1, Math.min(100, s || 1));
+    return timeScale;
+  },
+  getTimeScale: () => timeScale,
+  _lightInfo: () => lightInfo,
+  _cityNetActive: () => cityNetwork.isActive(),
   setAirborne: (altMeters = 1500, speedKt = 200) => {
     aircraft.onGround = false;
     aircraft.alt = altMeters;
@@ -233,15 +281,19 @@ window.flySim = {
   },
 };
 
-const hud = setupHud(window.flySim, AIRPORTS);
+const hud = setupHud(window.flySim, REGISTRY);
 
 // ---- 右下角导航小地图（ND）----
-const minimap = setupMinimap(AIRPORTS);
+const minimap = setupMinimap(REGISTRY);
 
-// ---- 起始航班选择界面（全屏覆盖层）----
-const flightSelect = setupFlightSelect(AIRPORTS, (plan) => {
+// ---- 地形加载过渡层（全屏 2D 航图，地形就绪后渐隐）----
+const loadingMap = setupLoadingMap();
+
+// ---- 起始航班选择界面（全屏覆盖层，可被 hud "换机场" 重新打开）----
+const flightSelect = setupFlightSelect(REGISTRY, (plan) => {
   startFlight(plan);
 });
+window.flySim.openFlightSelect = () => flightSelect.show();
 
 // ---- 近地警告系统（GPWS）----
 const gpws = createGPWS(null, () => aircraft.state(), terrain);
@@ -259,7 +311,17 @@ function frame() {
   syncSize(); // 每帧自愈画布尺寸/相机比例，防止进入游戏后画面偏移
 
   pollInput();
-  aircraft.update(dt);
+  // 时间加速：把加速后的时长切成多个 ≤ 基准步长的子步逐步积分，保证物理稳定
+  // （单步 dt 过大会让升力/姿态积分发散）。地面或暂停时不加速。
+  const scaledDt = dt * timeScale;
+  if (timeScale <= 1) {
+    aircraft.update(dt);
+  } else {
+    const MAX_SUB = 0.02; // 每子步最长 20ms
+    const n = Math.min(120, Math.ceil(scaledDt / MAX_SUB));
+    const sub = scaledDt / n;
+    for (let k = 0; k < n; k++) aircraft.update(sub);
+  }
 
   // 预取飞机正下方 DEM 瓦片，保证 AGL 查询命中
   terrain.prefetch(aircraft.lon, aircraft.lat);
@@ -274,7 +336,23 @@ function frame() {
   });
 
   updateCamera();
+  skybox.update(lightInfo); // 夜空（星/月/暮光渐变）跟随相机更新
+
+  // 城市夜景：矢量灯网（真实路网，夜间全程显示，LOD 随 AGL 自适应）为主，cityLights 光晕兜底。
+  const acs = aircraft.state();
+  const elevHere = terrain.elevationAt(acs.lon, acs.lat);
+  const aglHere = elevHere == null ? acs.alt : acs.alt - elevHere;
+  const night = lightInfo ? lightInfo.night : 0;
+  // 传入航向与地速：航线固定、路径可预测 → 沿航向前向偏置 + 远端预热缓存，提前加载前方灯网
+  const gsMps = acs.speedKt / 1.94384;
+  cityNetwork.update(acs.lon, acs.lat, aglHere, night, now, acs.headingRad, gsMps);
+  // 灯网活跃时关闭光晕兜底，避免模糊光斑污染真实灯网；否则光晕全亮
+  cityLights.update(night, now, cityNetwork.isActive() ? 0 : 1);
+
   renderer.render(scene, camera);
+
+  // 地形加载过渡层：地形就绪后渐隐（用无超时的 raycast 判定当前机场脚下地形）
+  loadingMap.update(now, terrainLoadedHere());
 
   // GPWS 评估（约每 250ms 一次），闪烁每帧更新
   if (now - lastGpwsEval > 250) {
@@ -302,6 +380,7 @@ function frame() {
 
 // 初始光照 + 启动
 refreshLighting();
+cityLights.rebuild(currentAirport.lat, currentAirport.lon); // 初始机场城市灯
 setInterval(refreshLighting, 5000); // 随时间缓慢刷新
 setupFreeCameraControls();
 updateCamera();

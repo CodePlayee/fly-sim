@@ -102,17 +102,12 @@ export function setupMinimap(airports) {
         lon: flightDest.lon, lat: flightDest.lat, custom: false,
       };
     }
-    let best = null;
-    let bestD = Infinity;
-    for (const icao of Object.keys(airports)) {
-      if (icao === currentIcao) continue;
-      const ap = airports[icao];
-      const dxk = (ap.lon - state.lon) * kmPerDegLon;
-      const dyk = (ap.lat - state.lat) * kmPerDegLat;
-      const d = Math.hypot(dxk, dyk);
-      if (d < bestD) { bestD = d; best = { name: icao, lon: ap.lon, lat: ap.lat, custom: false }; }
+    // 无航班计划/航点时，默认目标为当前出发机场（不再全库扫描——机场库可达数千）。
+    const dep = airports[currentIcao];
+    if (dep) {
+      return { name: currentIcao, lon: dep.lon, lat: dep.lat, custom: false };
     }
-    return best;
+    return null;
   }
 
   /**
@@ -258,23 +253,22 @@ export function setupMinimap(airports) {
       ctx.stroke();
     }
 
-    // ---- 机场 ----
-    for (const icao of Object.keys(airports)) {
-      const ap = airports[icao];
-      const [px, py] = project(ap.lon, ap.lat);
+    // ---- 机场：只画当前出发机场（机场库可达数千，不全库遍历）----
+    const depAp = airports[currentIcao];
+    if (depAp) {
+      const [px, py] = project(depAp.lon, depAp.lat);
       const [mx, my, clipped] = clampToRim(px, py);
-      const isDep = icao === currentIcao;
-      ctx.fillStyle = isDep ? '#ffd24a' : '#7fb0e0';
+      ctx.fillStyle = '#ffd24a';
       if (clipped) {
         ctx.beginPath();
         ctx.arc(mx, my, 3, 0, Math.PI * 2);
         ctx.fill();
       } else {
         ctx.fillRect(mx - 3, my - 3, 6, 6);
-        ctx.fillStyle = isDep ? '#ffe49a' : '#bcd6f0';
+        ctx.fillStyle = '#ffe49a';
         ctx.font = '9px sans-serif';
         ctx.textAlign = 'left';
-        ctx.fillText(icao, mx + 6, my - 5);
+        ctx.fillText(currentIcao, mx + 6, my - 5);
       }
     }
 

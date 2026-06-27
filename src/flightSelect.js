@@ -1,15 +1,15 @@
 /**
- * 起始航班选择界面：全屏覆盖层。
- * 流程：选出发机场 -> 选目的地航线（真实 OpenFlights 数据，含城市/国家/运营航司）
- *       -> 确认 -> 回调 onConfirm({ depIcao, dest })，主程序据此跳转并设定小地图导航。
+ * 起始航班选择界面：全屏覆盖层（可被 hud "换机场" 重新打开）。
+ * 流程：选出发机场（内置快捷 + 全球在线搜索）-> 选目的地航线（在线真实 OpenFlights 数据，
+ *       失败回退内置 ROUTES）-> 确认 -> 回调 onConfirm({ depIcao, dep, dest })。
  *
  * dest = { iata,icao,name,city,country,lon,lat, airlines:[{code,name}] }
  */
 import { ROUTES } from './routes.js';
+import { BUILTIN_KEYS, makeAirport, registerAirport } from './airports.js';
+import { searchAirports, getRunwayHeading, getRoutesFrom } from './dataSource.js';
 
 export function setupFlightSelect(airports, onConfirm) {
-  const DEP_KEYS = Object.keys(airports);
-
   const overlay = document.createElement('div');
   overlay.id = 'flight-select';
   overlay.style.cssText = `
@@ -34,12 +34,12 @@ export function setupFlightSelect(airports, onConfirm) {
   head.innerHTML = `
     <div style="font-size:20px;font-weight:700;letter-spacing:1px;">✈ flySim 航班计划</div>
     <div style="font-size:12px;opacity:.7;margin-top:4px;">
-      选择出发机场与目的地航线（真实航线数据 · OpenFlights）。确认后小地图自动导航。</div>`;
+      选择出发机场（内置快捷或在线搜索全球）与目的地航线（真实航线数据 · OpenFlights）。</div>`;
   panel.appendChild(head);
 
-  // ---- 出发机场选择 ----
+  // ---- 出发机场：内置快捷按钮 ----
   const depRow = document.createElement('div');
-  depRow.style.cssText = `display:flex; gap:10px; padding:16px 24px 8px; flex-wrap:wrap;`;
+  depRow.style.cssText = `display:flex; gap:10px; padding:16px 24px 4px; flex-wrap:wrap;`;
   panel.appendChild(depRow);
 
   const depLabel = document.createElement('div');
@@ -47,28 +47,44 @@ export function setupFlightSelect(airports, onConfirm) {
   depLabel.style.cssText = 'width:100%;font-size:12px;opacity:.65;margin-bottom:2px;';
   depRow.appendChild(depLabel);
 
-  let selectedDep = DEP_KEYS[0];
+  let selectedDep = BUILTIN_KEYS[0];
+  let depAirport = airports[selectedDep];
   const depBtns = {};
-  for (const icao of DEP_KEYS) {
+  for (const icao of BUILTIN_KEYS) {
     const ap = airports[icao];
     const b = document.createElement('button');
     b.innerHTML = `<b>${icao}</b><span style="opacity:.7;font-weight:400;"> · ${ap.city || ap.name}</span>`;
     b.style.cssText = btnCss(false);
-    b.onclick = () => { selectedDep = icao; renderDep(); renderDests(); };
+    b.onclick = () => selectDep(icao, airports[icao]);
     depBtns[icao] = b;
     depRow.appendChild(b);
   }
 
-  // ---- 搜索框 ----
+  // ---- 出发机场：全球在线搜索 ----
+  const depSearchWrap = document.createElement('div');
+  depSearchWrap.style.cssText = `padding:4px 24px 6px; position:relative;`;
+  const depSearch = document.createElement('input');
+  depSearch.type = 'text';
+  depSearch.placeholder = '在线搜索出发机场：城市 / 国家 / IATA / ICAO…';
+  depSearch.style.cssText = inputCss();
+  depSearchWrap.appendChild(depSearch);
+  // 下拉建议列表
+  const depSug = document.createElement('div');
+  depSug.style.cssText = `
+    position:absolute; left:24px; right:24px; top:100%; z-index:5; max-height:260px;
+    overflow-y:auto; background:#0c1c30; border:1px solid rgba(120,180,255,.3);
+    border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,.5); display:none;`;
+  depSearchWrap.appendChild(depSug);
+  panel.appendChild(depSearchWrap);
+
+  // ---- 目的地标题 + 搜索 ----
   const searchWrap = document.createElement('div');
-  searchWrap.style.cssText = `padding:6px 24px 10px; display:flex; gap:10px; align-items:center;`;
+  searchWrap.style.cssText = `padding:8px 24px 10px; display:flex; gap:10px; align-items:center;`;
   const search = document.createElement('input');
   search.type = 'text';
-  search.placeholder = '搜索目的地：城市 / 国家 / IATA…';
-  search.style.cssText = `
-    flex:1; padding:8px 12px; border-radius:8px; font-size:13px;
-    background:rgba(255,255,255,.06); color:#dCEaff;
-    border:1px solid rgba(120,180,255,.25); outline:none;`;
+  search.placeholder = '过滤目的地：城市 / 国家 / IATA…';
+  search.style.cssText = inputCss();
+  search.style.flex = '1';
   search.oninput = () => renderDests();
   searchWrap.appendChild(search);
   const countTag = document.createElement('span');
@@ -103,16 +119,31 @@ export function setupFlightSelect(airports, onConfirm) {
   foot.appendChild(goBtn);
 
   let selectedDest = null;
+  let destList = [];        // 当前出发机场的目的地（在线或回退）
+  let depReqSeq = 0;        // 防止异步竞态：仅最后一次出发选择的航线生效
 
+  function inputCss() {
+    return `width:100%; box-sizing:border-box; padding:8px 12px; border-radius:8px;
+      font-size:13px; background:rgba(255,255,255,.06); color:#dCEaff;
+      border:1px solid rgba(120,180,255,.25); outline:none;`;
+  }
   function btnCss(active) {
     return `padding:8px 14px; cursor:pointer; font-size:13px; border-radius:8px;
       background:${active ? '#2a6cc0' : 'rgba(255,255,255,.06)'};
       color:#dCEaff; border:1px solid ${active ? '#5a9ae8' : 'rgba(120,180,255,.22)'};
       transition:all .15s;`;
   }
+  function rowCss(sel) {
+    return `padding:10px 14px; margin:5px 0; border-radius:9px; cursor:pointer;
+      background:${sel ? 'rgba(42,108,192,.32)' : 'rgba(255,255,255,.035)'};
+      border:1px solid ${sel ? '#4a8fe0' : 'rgba(120,180,255,.12)'};
+      transition:all .12s;`;
+  }
 
   function renderDep() {
-    for (const icao of DEP_KEYS) depBtns[icao].style.cssText = btnCss(icao === selectedDep);
+    for (const icao of BUILTIN_KEYS) {
+      depBtns[icao].style.cssText = btnCss(icao === selectedDep);
+    }
   }
 
   function haversineKm(a, b) {
@@ -123,9 +154,110 @@ export function setupFlightSelect(airports, onConfirm) {
     return 2 * R * Math.asin(Math.sqrt(h));
   }
 
+  // ---- 出发机场选择（内置或在线搜索结果）----
+  async function selectDep(icao, ap) {
+    selectedDep = icao;
+    depAirport = ap || airports[icao];
+    selectedDest = null;
+    renderDep();
+    renderSummary();
+    const seq = ++depReqSeq;
+
+    listWrap.innerHTML = '<div style="opacity:.6;padding:24px;text-align:center;">正在加载航线…</div>';
+    countTag.textContent = '';
+
+    let list = [];
+    try {
+      list = await getRoutesFrom(icao);
+    } catch (e) {
+      list = null; // 在线失败 -> 回退
+    }
+    if (seq !== depReqSeq) return; // 已被新的选择取代
+
+    if (!list || !list.length) {
+      const fb = ROUTES[icao];
+      if (fb && fb.length) {
+        list = fb;
+        countTag.textContent = '（离线数据）';
+      } else if (!list) {
+        listWrap.innerHTML = '<div style="opacity:.6;padding:24px;text-align:center;">'
+          + '航线数据加载失败，请检查网络后重选出发机场。</div>';
+        destList = [];
+        return;
+      }
+    }
+    destList = list || [];
+    renderDests();
+  }
+
+  // ---- 出发机场在线搜索（防抖）----
+  let depSearchTimer = null;
+  let depSearchSeq = 0;
+  depSearch.oninput = () => {
+    clearTimeout(depSearchTimer);
+    const q = depSearch.value.trim();
+    if (q.length < 2) { depSug.style.display = 'none'; return; }
+    depSearchTimer = setTimeout(() => runDepSearch(q), 250);
+  };
+  depSearch.onblur = () => setTimeout(() => { depSug.style.display = 'none'; }, 150);
+  depSearch.onfocus = () => { if (depSug.children.length) depSug.style.display = 'block'; };
+
+  async function runDepSearch(q) {
+    const seq = ++depSearchSeq;
+    depSug.innerHTML = '<div style="padding:10px 14px;opacity:.6;">搜索中…</div>';
+    depSug.style.display = 'block';
+    let results = [];
+    try {
+      results = await searchAirports(q, 30);
+    } catch (e) {
+      if (seq !== depSearchSeq) return;
+      depSug.innerHTML = '<div style="padding:10px 14px;opacity:.6;">搜索失败（网络）。仅可用内置机场。</div>';
+      return;
+    }
+    if (seq !== depSearchSeq) return;
+    if (!results.length) {
+      depSug.innerHTML = '<div style="padding:10px 14px;opacity:.6;">无匹配机场</div>';
+      return;
+    }
+    depSug.innerHTML = '';
+    for (const r of results) {
+      const item = document.createElement('div');
+      item.style.cssText = `padding:9px 14px; cursor:pointer; border-bottom:1px solid rgba(120,180,255,.08);`;
+      item.onmouseenter = () => item.style.background = 'rgba(42,108,192,.3)';
+      item.onmouseleave = () => item.style.background = 'transparent';
+      const code = r.icao || r.iata || '????';
+      item.innerHTML = `
+        <span style="color:#9fd0ff;font-weight:700;">${code}</span>
+        <span style="margin-left:8px;">${r.city || r.name}</span>
+        <span style="font-size:11px;opacity:.55;margin-left:6px;">${r.country || ''}</span>`;
+      // mousedown 先于 blur，确保点击生效
+      item.onmousedown = (ev) => { ev.preventDefault(); pickDepFromSearch(r); };
+      depSug.appendChild(item);
+    }
+  }
+
+  // 选定一个在线搜索机场作为出发点：补跑道航向 + 注册 + 切换
+  async function pickDepFromSearch(record) {
+    depSug.style.display = 'none';
+    depSearch.value = `${record.icao || record.iata} · ${record.city || record.name}`;
+    const icao = record.icao || record.iata;
+    listWrap.innerHTML = '<div style="opacity:.6;padding:24px;text-align:center;">正在获取机场跑道数据…</div>';
+    let heading = null;
+    try {
+      if (record.icao) heading = await getRunwayHeading(record.icao);
+    } catch (e) { heading = null; }
+    const ap = registerAirport(makeAirport(record, heading));
+    airports[ap.icao] = ap; // 并入传入的注册表引用
+    // 内置按钮取消高亮（当前出发为搜索结果）
+    selectedDep = ap.icao;
+    for (const k of BUILTIN_KEYS) depBtns[k].style.cssText = btnCss(false);
+    await selectDep(ap.icao, ap);
+  }
+
+  // ---- 目的地列表渲染 ----
   function renderDests() {
-    const dep = airports[selectedDep];
-    const all = ROUTES[selectedDep] || [];
+    const dep = depAirport;
+    const all = destList || [];
     const q = search.value.trim().toLowerCase();
     const dests = all.filter((d) => {
       if (!q) return true;
@@ -134,7 +266,8 @@ export function setupFlightSelect(airports, onConfirm) {
         || (d.iata || '').toLowerCase().includes(q)
         || (d.name || '').toLowerCase().includes(q);
     });
-    countTag.textContent = `${dests.length} / ${all.length} 条航线`;
+    const offline = countTag.textContent.includes('离线') ? '（离线数据）' : '';
+    countTag.textContent = `${dests.length} / ${all.length} 条航线 ${offline}`;
 
     listWrap.innerHTML = '';
     if (!dests.length) {
@@ -151,7 +284,7 @@ export function setupFlightSelect(airports, onConfirm) {
       const more = (d.airlines || []).length > 4 ? ` 等${d.airlines.length}家` : '';
       row.innerHTML = `
         <div style="display:flex;align-items:baseline;gap:8px;">
-          <b style="font-size:15px;color:#9fd0ff;">${d.iata}</b>
+          <b style="font-size:15px;color:#9fd0ff;">${d.iata || d.icao}</b>
           <b style="font-size:14px;">${d.city || d.name}</b>
           <span style="font-size:11px;opacity:.6;">${d.country || ''}</span>
           <span style="margin-left:auto;font-size:12px;opacity:.7;font-variant-numeric:tabular-nums;">${distKm} km</span>
@@ -162,27 +295,20 @@ export function setupFlightSelect(airports, onConfirm) {
     }
   }
 
-  function rowCss(sel) {
-    return `padding:10px 14px; margin:5px 0; border-radius:9px; cursor:pointer;
-      background:${sel ? 'rgba(42,108,192,.32)' : 'rgba(255,255,255,.035)'};
-      border:1px solid ${sel ? '#4a8fe0' : 'rgba(120,180,255,.12)'};
-      transition:all .12s;`;
-  }
-
   function renderSummary() {
     if (!selectedDest) {
       summary.innerHTML = '<span style="opacity:.6;">请选择一条航线…</span>';
       goBtn.style.opacity = '.45'; goBtn.style.pointerEvents = 'none';
       return;
     }
-    const dep = airports[selectedDep];
+    const dep = depAirport;
     const d = selectedDest;
     const lead = (d.airlines && d.airlines[0]) ? (d.airlines[0].name || d.airlines[0].code) : '';
     summary.innerHTML = `
       <b style="font-size:15px;">${selectedDep}</b>
-      <span style="opacity:.6;">${dep.city || ''}</span>
+      <span style="opacity:.6;">${(dep && dep.city) || ''}</span>
       <span style="margin:0 8px;color:#5a9ae8;">✈──→</span>
-      <b style="font-size:15px;color:#9fd0ff;">${d.iata}</b>
+      <b style="font-size:15px;color:#9fd0ff;">${d.iata || d.icao}</b>
       <span style="opacity:.85;">${d.city || d.name}</span>
       <span style="opacity:.55;">· ${d.country || ''}</span>
       ${lead ? `<div style="font-size:11px;opacity:.6;margin-top:3px;">${lead}${d.airlines.length > 1 ? ` 等${d.airlines.length}家航司运营` : ''}</div>` : ''}`;
@@ -193,15 +319,18 @@ export function setupFlightSelect(airports, onConfirm) {
     if (!selectedDest) return;
     overlay.style.transition = 'opacity .4s';
     overlay.style.opacity = '0';
-    setTimeout(() => overlay.remove(), 400);
-    onConfirm({ depIcao: selectedDep, dest: selectedDest });
+    setTimeout(() => { overlay.style.display = 'none'; }, 400); // 隐藏而非移除，可重开
+    onConfirm({ depIcao: selectedDep, dep: depAirport, dest: selectedDest });
   }
 
-  // 初始渲染
+  // 初始渲染：默认选中第一个内置机场并加载其航线
   renderDep();
-  renderDests();
+  selectDep(selectedDep, depAirport);
 
   return {
-    show: () => { overlay.style.display = 'flex'; overlay.style.opacity = '1'; },
+    show: () => {
+      overlay.style.display = 'flex';
+      overlay.style.opacity = '1';
+    },
   };
 }
