@@ -101,7 +101,7 @@ export function setupCityNetwork(scene, terrain, source) {
   // 灯光离地抬升：geo-three 视觉地形 mesh 高度与 terrain.elevationAt 采样不完全一致，
   // 灯若仅贴地几米会被地形 mesh 遮挡（掠视时大片消失）。抬高至此值可从地形浮出，
   // 而巡航高度(数千米)下这点偏移在视觉上仍"贴地"，飞机也仍能正确遮挡其下方灯光。
-  const LIGHT_LIFT = 80;
+  const LIGHT_LIFT = 50;
   // 贴地高度采样（地形未加载用 0）
   function groundY(lon, lat) {
     const e = terrain ? terrain.elevationAt(lon, lat) : 0;

@@ -6,7 +6,7 @@
  * dest = { iata,icao,name,city,country,lon,lat, airlines:[{code,name}] }
  */
 import { ROUTES } from './routes.js';
-import { BUILTIN_KEYS, makeAirport, registerAirport } from './airports.js';
+import { BUILTIN_KEYS, DEFAULT_DEST_IATA, makeAirport, registerAirport } from './airports.js';
 import { searchAirports, getRunwayHeading, getRoutesFrom } from './dataSource.js';
 
 export function setupFlightSelect(airports, onConfirm) {
@@ -119,7 +119,8 @@ export function setupFlightSelect(airports, onConfirm) {
   foot.appendChild(goBtn);
 
   let selectedDest = null;
-  let destList = [];        // 当前出发机场的目的地（在线或回退）
+  let destList = [];        // 当前出发机场的目的地（在线或内置离线）
+  let destOffline = false;  // 当前列表是否来自内置离线数据（在线到达后会被替换）
   let depReqSeq = 0;        // 防止异步竞态：仅最后一次出发选择的航线生效
 
   function inputCss() {
@@ -155,39 +156,55 @@ export function setupFlightSelect(airports, onConfirm) {
   }
 
   // ---- 出发机场选择（内置或在线搜索结果）----
-  async function selectDep(icao, ap) {
+  // 策略：**离线优先、在线增补**。内置机场（含默认的 VHHH）在 src/routes.js 里已有
+  // 完整航线，先同步渲染出来（0 网络等待、可立即开飞）；在线的 OpenFlights 全量数据
+  // 到达后再无缝替换列表，并按 IATA 复位已选中的目的地。
+  // 旧实现是先 await 在线三份 CSV（~860KB gzip，跨域 raw.githubusercontent.com）
+  // 才渲染，把内置数据只当失败兜底，导致首屏白等一个完整往返。
+  async function selectDep(icao, ap, opts = {}) {
     selectedDep = icao;
     depAirport = ap || airports[icao];
     selectedDest = null;
     renderDep();
-    renderSummary();
     const seq = ++depReqSeq;
 
-    listWrap.innerHTML = '<div style="opacity:.6;padding:24px;text-align:center;">正在加载航线…</div>';
-    countTag.textContent = '';
+    // ① 内置离线航线：同步立即渲染
+    const offline = ROUTES[icao];
+    if (offline && offline.length) {
+      destList = offline;
+      destOffline = true;
+      if (opts.preselectIata) {
+        selectedDest = offline.find((d) => d.iata === opts.preselectIata) || null;
+      }
+      renderDests();
+    } else {
+      destList = [];
+      destOffline = false;
+      listWrap.innerHTML = '<div style="opacity:.6;padding:24px;text-align:center;">正在加载航线…</div>';
+      countTag.textContent = '';
+    }
+    renderSummary();
 
-    let list = [];
+    // ② 在线真实航线：到达后替换（保持当前选中的目的地）
+    let list = null;
     try {
       list = await getRoutesFrom(icao);
     } catch (e) {
-      list = null; // 在线失败 -> 回退
+      list = null; // 在线失败 -> 保留离线列表
     }
     if (seq !== depReqSeq) return; // 已被新的选择取代
 
-    if (!list || !list.length) {
-      const fb = ROUTES[icao];
-      if (fb && fb.length) {
-        list = fb;
-        countTag.textContent = '（离线数据）';
-      } else if (!list) {
-        listWrap.innerHTML = '<div style="opacity:.6;padding:24px;text-align:center;">'
-          + '航线数据加载失败，请检查网络后重选出发机场。</div>';
-        destList = [];
-        return;
-      }
+    if (list && list.length) {
+      const keep = selectedDest && selectedDest.iata;
+      destList = list;
+      destOffline = false;
+      if (keep) selectedDest = list.find((d) => d.iata === keep) || selectedDest;
+      renderDests();
+      renderSummary();
+    } else if (!destList.length) {
+      listWrap.innerHTML = '<div style="opacity:.6;padding:24px;text-align:center;">'
+        + '航线数据加载失败，请检查网络后重选出发机场。</div>';
     }
-    destList = list || [];
-    renderDests();
   }
 
   // ---- 出发机场在线搜索（防抖）----
@@ -266,7 +283,7 @@ export function setupFlightSelect(airports, onConfirm) {
         || (d.iata || '').toLowerCase().includes(q)
         || (d.name || '').toLowerCase().includes(q);
     });
-    const offline = countTag.textContent.includes('离线') ? '（离线数据）' : '';
+    const offline = destOffline ? '（内置离线数据 · 在线航线加载中…）' : '';
     countTag.textContent = `${dests.length} / ${all.length} 条航线 ${offline}`;
 
     listWrap.innerHTML = '';
@@ -274,11 +291,13 @@ export function setupFlightSelect(airports, onConfirm) {
       listWrap.innerHTML = '<div style="opacity:.5;padding:24px;text-align:center;">无匹配航线</div>';
       return;
     }
+    let selRow = null;
     for (const d of dests) {
       const distKm = dep ? Math.round(haversineKm(dep, d)) : 0;
       const row = document.createElement('div');
       const isSel = selectedDest && selectedDest.iata === d.iata;
       row.style.cssText = rowCss(isSel);
+      if (isSel) selRow = row;
       const airlines = (d.airlines || []).slice(0, 4)
         .map((a) => a.name || a.code).join('、');
       const more = (d.airlines || []).length > 4 ? ` 等${d.airlines.length}家` : '';
@@ -293,6 +312,8 @@ export function setupFlightSelect(airports, onConfirm) {
       row.onclick = () => { selectedDest = d; renderDests(); renderSummary(); };
       listWrap.appendChild(row);
     }
+    // 默认预选项（如杭州）可能排在列表深处，滚动到可见处
+    if (selRow) listWrap.scrollTop = Math.max(0, selRow.offsetTop - listWrap.clientHeight / 2);
   }
 
   function renderSummary() {
@@ -323,9 +344,11 @@ export function setupFlightSelect(airports, onConfirm) {
     onConfirm({ depIcao: selectedDep, dep: depAirport, dest: selectedDest });
   }
 
-  // 初始渲染：默认选中第一个内置机场并加载其航线
+  // 初始渲染：默认航班 = 香港 VHHH ✈──→ 杭州 HGH。
+  // 出发/目的地都来自内置离线数据，界面**同步**就绪、「开始飞行」立即可点，
+  // 无需等待任何网络请求；在线全量航线到达后再静默替换列表。
   renderDep();
-  selectDep(selectedDep, depAirport);
+  selectDep(selectedDep, depAirport, { preselectIata: DEFAULT_DEST_IATA });
 
   return {
     show: () => {

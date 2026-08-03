@@ -41,6 +41,14 @@ export const AIRPORTS = {
 
 export const DEFAULT_AIRPORT = 'VHHH';
 
+/**
+ * 默认航班：香港 VHHH ✈──→ 杭州萧山 HGH(ZSHC)。
+ * 该目的地已存在于内置 ROUTES.VHHH 中，故启动时可**完全离线**地把航线列表与
+ * 默认选择渲染出来（0 网络等待），在线数据到达后再无缝替换。
+ * 同时 main.js 据此在页面打开的第一时间就并发预热 VHHH 脚下的地形瓦片。
+ */
+export const DEFAULT_DEST_IATA = 'HGH';
+
 /** 内置 3 机场的 ICAO（即时可用 + 离线兜底）。 */
 export const BUILTIN_KEYS = Object.keys(AIRPORTS);
 

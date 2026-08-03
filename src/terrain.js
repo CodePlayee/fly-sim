@@ -10,11 +10,17 @@
  *   elevation = (R*256 + G + B/256) − 32768
  * 并对瓦片内像素做双线性插值。瓦片以 LRU 方式缓存（Uint8 像素），命中后纯本地计算，
  * 无网络、可在每帧/预测航迹上密集采样。
+ *
+ * 瓦片 URL 与 geo-three 的 TerrariumHeightProvider **共用** demHosts.js 的多 origin
+ * 分片规则，因此同一瓦片两边命中同一主机、复用浏览器 HTTP 缓存，不会重复下载。
+ *
+ * 查询结果同样经 runwayFlatten 的**机场跑道压平**修正，与 provider 写进视觉 mesh 的
+ * 高程保持一致，否则 AGL 读数会和飞机实际所处的地形对不上。
  */
+import { demTileUrl } from './providers/demHosts.js';
+import { flattenAt } from './runwayFlatten.js';
 
 const TILE = 256;
-const DEM_URL = (z, x, y) =>
-  `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
 
 export function createTerrain({ maxZoom = 14, cacheSize = 256 } = {}) {
   // 瓦片缓存：key=`z/x/y` -> { data:Uint8ClampedArray|null, loading:bool }
@@ -58,7 +64,7 @@ export function createTerrain({ maxZoom = 14, cacheSize = 256 } = {}) {
       entry.loading = false;
     };
     img.onerror = () => { entry.loading = false; };
-    img.src = DEM_URL(z, x, y);
+    img.src = demTileUrl(z, x, y);
     return entry;
   }
 
@@ -100,7 +106,8 @@ export function createTerrain({ maxZoom = 14, cacheSize = 256 } = {}) {
     const e11 = decode(entry.data, x1, y1);
     const top = e00 * (1 - tx) + e10 * tx;
     const bot = e01 * (1 - tx) + e11 * tx;
-    return top * (1 - ty) + bot * ty;
+    // 机场压平：与 TerrariumHeightProvider 写进视觉 mesh 的高程用同一套修正
+    return flattenAt(lon, lat, top * (1 - ty) + bot * ty);
   }
 
   /** 预取某点所在瓦片（不阻塞，供提前拉取航迹上的瓦片）。 */

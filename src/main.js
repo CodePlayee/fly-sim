@@ -15,6 +15,8 @@ import { setupSkybox } from './skybox.js';
 import { setupCityLights } from './cityLights.js';
 import { createVectorTileSource } from './providers/VectorTileSource.js';
 import { setupCityNetwork } from './cityNetwork.js';
+import { warmupTerrain } from './terrainWarmup.js';
+import { registerFlatten } from './runwayFlatten.js';
 
 const DEG = Math.PI / 180;
 
@@ -24,7 +26,16 @@ const aircraft = new Aircraft(currentAirport);
 
 // ---- 统一 three.js 世界（场景原点平移到起始机场，避免浮点抖动）----
 setOrigin(currentAirport.lat, currentAirport.lon);
-const { renderer, scene, camera, mapView, syncSize } = createWorld();
+// ⚠️ 压平区必须在任何瓦片被拉取**之前**注册，否则已解码的瓦片不会再被压平。
+registerFlatten(currentAirport);
+const { renderer, scene, camera, mapView, syncSize, setLodEnabled, imageryProvider, heightProvider } = createWorld();
+
+// ---- 地形定向预热：页面打开的第一时间就并发拉默认机场(VHHH)脚下的整条 LOD 链路 ----
+// 用户还在航班选择界面挑目的地时，地形已经在后台加载了；且绕过 geo-three 的逐级
+// 串行瀑布（详见 terrainWarmup.js），15 个网络往返压成 ~1 个。
+// 同时暂停 LODFrustum，把 HTTP/1.1 的 6 条连接全留给这条关键路径。
+warmupTerrain(mapView, currentAirport.lat, currentAirport.lon);
+setLodEnabled(false);
 
 // ---- 光照装置（Sky 穹顶 + 平行光 + 环境光 + 雾）----
 const env = setupSky(scene);
@@ -187,11 +198,26 @@ function goToAirport(icaoOrAirport) {
   if (typeof icaoOrAirport !== 'string') registerAirport(ap);
   currentAirport = ap;
 
+  // 跑道压平：必须先于 warmupTerrain 注册，否则新机场的瓦片会以未压平状态解码缓存
+  registerFlatten(ap);
+
   // 原点平移到新机场 + 同步 mapView 位置（与 world.js 初始化一致）。
   setOrigin(ap.lat, ap.lon);
   const o = getOrigin();
   mapView.position.set(-o.x, 0, o.y);
   mapView.updateMatrixWorld(true);
+
+  // 取消旧机场仍在途的瓦片请求：服务器是 HTTP/1.1（单 origin 仅 6 条连接），
+  // 不取消的话新机场的关键路径会被排在几百个旧请求后面，只能等过渡层 18s 兜底。
+  imageryProvider.abortPending();
+  heightProvider.abortPending();
+
+  // 新机场脚下地形链路并发预热（幂等：已建好的链路直接复用）
+  warmupTerrain(mapView, ap.lat, ap.lon);
+  terrain.prefetch(ap.lon, ap.lat); // AGL 用的 DEM 也提前拉
+  terrainReadyHere = false;         // 过渡层需对新机场重新判定
+  lastTerrainEval = 0;
+  pauseLodForWarmup(performance.now()); // 连接额度先给新机场的关键路径
 
   aircraft.reset(currentAirport);
   if (typeof minimap !== 'undefined') minimap.reset(); // 清空航迹
@@ -211,21 +237,69 @@ function startFlight({ depIcao, dest }) {
 }
 
 // ---- tilesReady：地形是否就绪（替代 MapLibre areTilesLoaded）----
-// 用飞机正下方向下 raycast 命中 mapView 判断；并有启动超时兜底，截图不挂死。
+// 用飞机正下方向下 raycast 命中地形节点判断；并有启动超时兜底，截图不挂死。
 const _ray = new THREE.Raycaster();
 const _down = new THREE.Vector3(0, -1, 0);
 const _startTime = performance.now();
 function tilesReady() {
   if (performance.now() - _startTime > 6000) return true; // 兜底超时
-  return terrainLoadedHere();
+  return terrainLevelHere() >= 0;
 }
 
-// 当前机场正下方地形是否已加载（纯 raycast，无全局超时——供加载过渡层判定，
-// 否则页面开启 6s 后换机场会让过渡层立即消失）。
-function terrainLoadedHere() {
+/**
+ * 飞机正下方**已真正可见**的地形的最深 LOD 层级（-1 = 尚无任何地形）。
+ *
+ * ⚠️ 两个坑：
+ * 1. 不能用 `_ray.intersectObject(mapView, true)`：geo-three 的 `MapView.raycast()`
+ *    无条件 `return false`（geo-three.module.js:1486），而 three ≥0.164 把返回 false
+ *    解读为「不要向子节点递归」（three/src/core/Raycaster.js:110），于是**恒返回空数组**。
+ *    后果是过渡层判定永远不成立、只能靠 18s 兜底超时消失——与地形实际就绪速度无关。
+ *    改为从 mapView.children（root 节点）起算即可正常命中。
+ * 2. three 的 raycast **不过滤 visible**，而 MapHeightNode 在瓦片下载完成前就已存在
+ *    （持有 1×1 的占位几何体、visible=false）。必须显式检查整条祖先链的 visible
+ *    —— geo-three 正是用它表示「本节点及 3 个兄弟的影像+高程都已就绪」。
+ */
+function terrainLevelHere() {
   geoToWorld(aircraft.lat, aircraft.lon, 0, _acPos);
   _ray.set(new THREE.Vector3(_acPos.x, 1e6, _acPos.z), _down);
-  return _ray.intersectObject(mapView, true).length > 0;
+  const hits = _ray.intersectObjects(mapView.children, true);
+  let lv = -1;
+  for (const h of hits) {
+    const o = h.object;
+    if (o.level == null || o.level <= lv) continue;
+    if (o.heightLoaded !== true || o.textureLoaded !== true) continue;
+    let n = o, shown = true;
+    while (n && n !== mapView) { // 祖先链任一层不可见则本节点不会被渲染
+      if (!n.visible) { shown = false; break; }
+      n = n.parent;
+    }
+    if (shown) lv = o.level;
+  }
+  return lv;
+}
+
+// 过渡层揭幕阈值：脚下已有 ≥z12 瓦片（约 10km/格）即认为够看，
+// 更精细的 z13~z15 在飞行中后台继续细化，不必干等。
+const REVEAL_LEVEL = 12;
+const LOD_RESUME_MAX_MS = 20000; // 兜底：无论如何 20s 后恢复 LOD，避免地形永远不细化
+let lastTerrainEval = 0;
+let terrainReadyHere = false;
+let lodPauseStart = performance.now();
+let lodResumed = false;
+
+/** 暂停 LOD，把连接额度让给 warmupTerrain 建好的关键路径（首屏 / 换机场时）。 */
+function pauseLodForWarmup(now) {
+  lodPauseStart = now;
+  lodResumed = false;
+  setLodEnabled(false);
+}
+
+/** 关键路径就绪（或超时）后恢复 LODFrustum，交回常规流式细化。 */
+function resumeLod(now) {
+  if (lodResumed) return;
+  if (!terrainReadyHere && now - lodPauseStart < LOD_RESUME_MAX_MS) return;
+  lodResumed = true;
+  setLodEnabled(true);
 }
 
 // ---- 对外 API（供 HUD / 小地图 / 截图脚本）----
@@ -258,6 +332,7 @@ window.flySim = {
   getTimeScale: () => timeScale,
   _lightInfo: () => lightInfo,
   _cityNetActive: () => cityNetwork.isActive(),
+  _terrainLevel: () => terrainLevelHere(), // 脚下已就绪地形的最深 LOD 层级（调试/基准用）
   setAirborne: (altMeters = 1500, speedKt = 200) => {
     aircraft.onGround = false;
     aircraft.alt = altMeters;
@@ -351,8 +426,14 @@ function frame() {
 
   renderer.render(scene, camera);
 
-  // 地形加载过渡层：地形就绪后渐隐（用无超时的 raycast 判定当前机场脚下地形）
-  loadingMap.update(now, terrainLoadedHere());
+  // 地形加载过渡层：脚下地形达到揭幕层级后渐隐（raycast 判定，无全局超时）。
+  // raycast 要遍历地形四叉树，故仅在需要时限频 200ms 评估一次。
+  if ((!lodResumed || loadingMap.isActive()) && now - lastTerrainEval > 200) {
+    terrainReadyHere = terrainLevelHere() >= REVEAL_LEVEL;
+    lastTerrainEval = now;
+  }
+  resumeLod(now);
+  if (loadingMap.isActive()) loadingMap.update(now, terrainReadyHere);
 
   // GPWS 评估（约每 250ms 一次），闪烁每帧更新
   if (now - lastGpwsEval > 250) {

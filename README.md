@@ -25,6 +25,7 @@
 npm install
 npm run dev      # http://127.0.0.1:5273/
 npm run shot     # 生成 shots/*.png 截图验证
+npm run bench    # 首屏耗时基准（航线列表 / 地形各 LOD 层级就绪时间）
 ```
 
 ### 操作
@@ -71,7 +72,9 @@ npm run shot     # 生成 shots/*.png 截图验证
 
 ## 航班计划与自动导航
 
-初始进入显示**航班选择界面**：选出发机场 → 选目的地航线 → 「开始飞行」，
+初始进入显示**航班选择界面**，默认航班为 **VHHH 香港 ✈──→ HGH 杭州萧山**，
+出发/目的地都取自内置离线数据，界面**同步就绪**、「开始飞行」立即可点（实测 ~230ms）；
+在线全量航线随后到达再静默替换列表。也可自行选出发机场 → 选目的地航线 → 「开始飞行」，
 小地图随即自动导航到所选目的地（品红虚线航线 + 方位/距离）。
 
 航线为**真实公开数据**（[OpenFlights](https://github.com/jpatokal/openflights)
@@ -146,16 +149,101 @@ SunCalc 按机场真实经纬度 + 时刻计算太阳/月亮的方位角与高�
     高空(瓦片大、速度快)与低空(瓦片小)都有足够提前量。
 - **兜底**：瓦片加载失败/断网 → 自动回退 `cityLights.js` 暖色光晕，不中断。
 
+## 首屏加载优化
+
+首屏原本很慢（实测：航线列表 1.2s，机场脚下地形达到 z12 要 **57s**、z14 要 **66s**，
+过渡层则固定压满 18s）。定位到五个根因并逐项修复，现在航线列表 **~190ms**、
+地形 z12 **~7s**、点「开始飞行」到过渡层消失 **~1.7s**（挑航班的那几秒里地形已加载完）：
+
+| 根因 | 说明 | 修复 |
+|------|------|------|
+| **航线数据先等网络** | 启动即 `await` 三份跨域 CSV（airports/routes/airlines，共 7.5MB 原始 / 860KB gzip），内置 `src/routes.js` 只当失败兜底 | `flightSelect.js` 改为**离线优先、在线增补**：内置机场同步渲染，在线数据到达后按 IATA 复位选中项无缝替换 |
+| **geo-three 逐级串行瀑布**（主因） | `MapNode.subdivide()` 要求 `parentNode.nodesLoaded === 4`，即父节点的 4 个兄弟瓦片全部下载解码完才允许下一级细分；且只在 `onBeforeRender` 触发，每级还占一帧。从 z0 到 z14 = **14 个严格串行的网络波次** | 新增 `terrainWarmup.js`，直接调 `createChildNodes()` 沿目标机场链路建树，绕过该门槛，**14 个 RTT 压成 ~1 个**；页面一打开就预热（用户还在选航班时地形已在加载） |
+| **每张瓦片内部又串行一次** | `MapHeightNode.initialize()` 是 `await loadData()` 然后 `await loadHeightGeometry()`——影像与高程互不依赖却吃 **2 个串行 RTT**，把总时长直接翻倍 | `world.js` 顶部打补丁改成 `Promise.all` 并行（首屏过渡层实测 5.8s → 1.7s） |
+| **就绪判定恒为假** | geo-three 的 `MapView.raycast()` 无条件 `return false`，而 three ≥0.164 把 false 解读为「不要向子节点递归」→ `intersectObject(mapView,true)` **永远返回空**，过渡层只能靠 `MAX_MS=18000` 兜底消失，与地形实际速度无关 | 改从 `mapView.children` 起算；并显式校验 `heightLoaded/textureLoaded` + 整条祖先链 `visible`（three 的 raycast 不过滤 `visible`，占位节点会造成误判） |
+| **HTTP/1.1 单 origin 6 连接** | Esri 与 S3 都只支持 HTTP/1.1，上百张瓦片被切成十几个串行波次；换机场时旧机场的几百个在途请求还会把新机场的关键路径挤到队尾 | DEM 走 `providers/demHosts.js` 的 **4 个等价 S3 origin** 确定性分片（同瓦片恒定同主机以复用缓存）；首屏暂停 LODFrustum 把连接额度让给关键路径（揭幕后或 20s 兜底恢复）；换机场时 `provider.abortPending()` 取消旧机场在途请求（换机场实测 18.9s → 9.4s） |
+
+此外过渡层改为**分阶段揭幕**：脚下出现 ≥z12 瓦片即渐隐（`REVEAL_LEVEL`），
+更精细的 z13~z15 在飞行中后台继续细化，不必干等。
+预热也分两阶段：正下方链路立即建（关键路径），周边 3×3 圈延到 `requestIdleCallback` 再建。
+
+> 剩余瓶颈：Esri 影像只有单一 origin（无可用备选主机）且不支持 HTTP/2，6 条连接
+> 是硬上限。要再快需减少链路瓦片数，或让低层级换用另一 origin 的免费全球影像分担。
+> 用 `npm run bench` 可复现测量（网络抖动较大，建议多跑几轮取中位数）。
+
+## 机场跑道压平
+
+全球 DEM 精度有限（Terrarium z14/z15 约 10~30m/px），而 geo-three 每块瓦片只把
+256×256 高程**降采样成 17×17 个顶点**（z14 下约 150m 一个采样点），跑道沿线的地形
+mesh 因此是起伏的；而 `aircraft.js` 的触地判定用的是常数 `fieldElevation + 3`
+（机场标高），两者对不上——滑跑中只要某处地形高过机场标高，**飞机就会被埋进地面**。
+
+> 实测因斯布鲁克 LOWI（标高 581m）：起飞方向 +2500~3000m 处地形 mesh 高达 **599.7m**，
+> 比飞机的 584.0m 高出近 16m，23 个采样点里有 3 个把飞机埋住。
+
+注意「让飞机改为跟随 `terrain.elevationAt`」**解决不了**：那是 256×256 双线性采样，
+与 geo-three 的 17×17 最近邻降采样是两个不同的值，差异可达数十米
+（`cityNetwork.js` 的 `LIGHT_LIFT` 正是为绕开这个差异而存在）。
+
+`runwayFlatten.js` 采用真实模拟器的做法——在机场周围把高程强制压到机场标高：
+
+| 距机场中心 | 高程 |
+|---|---|
+| ≤ 2200m（`FLAT_RADIUS`） | 恒等于 `airport.elevation`（完全平，覆盖最长跑道的半长） |
+| 2200 ~ 6000m（`BLEND_RADIUS`） | smoothstep 混合，避免出现环形悬崖 |
+| ≥ 6000m | 原始高程，真实地貌不受影响 |
+
+关键是它**同时作用于两条链路**，使二者在机场区域严格相等、误差为 0：
+- `TerrariumHeightProvider`：转码时写进瓦片像素 → 决定 geo-three 的**视觉 mesh**
+- `terrain.js elevationAt`：输出端修正 → 决定 **AGL / GPWS** 读数
+
+> ⚠️ 压平区必须在该机场瓦片被加载**之前**注册（`main.js` 在启动时、以及 `goToAirport`
+> 里先于 `warmupTerrain` 调用 `registerFlatten`），否则已解码缓存的瓦片不会重新压平。
+> 注册表是累积的，来回切换机场不会失效。低于 `FLATTEN_MIN_ZOOM=10` 的瓦片跳过压平
+> （顶点间距达数 km，压平无视觉意义，却要为链路上每一级白跑 65536 次逐像素计算）。
+
+压平后同一条跑道带恒为 581.0m，飞机 584.0m，**0/23 采样点穿模**。
+
+## 瓦片失败与黑色矩形块
+
+geo-three 对瓦片加载失败的处理是**一次性**的：
+
+```js
+catch { this.material.map = MapNode.defaultTexture; }   // MapNode.loadData
+MapNode.defaultTexture = TextureUtils.createFillTexture(); // 默认 '#000000'，1×1 纯黑
+```
+
+即**任何一次加载失败，那块地形就永久变成黑色矩形**，此后不会再重试。
+
+而首屏优化引入的 `abortPending()`（换机场时取消旧机场在途请求、把 HTTP/1.1 仅有的
+6 条连接让给新机场）会让几百个请求以 `net::ERR_ABORTED` 结束 —— 实测**一次换机场
+就制造 200 个黑块**。诊断佐证：全程不换机场时 abort 数为 **0**、且 HTTP 状态码里
+**没有任何非 200**（不是限流、不是 404，纯粹是自己取消的）。
+
+`providers/RetryingImageLoader.js` 重新定义了两种失败语义：
+
+| 场景 | 行为 |
+|------|------|
+| **abort**（换机场让路） | 中止下载立刻释放连接，但 Promise **保持 pending**，1.5s 后自动重发 —— geo-three 永远等到真实数据，不会走进黑色兜底 |
+| **真实网络错误** | 指数退避重试 2 次（400ms / 800ms），耗尽才 reject |
+
+修复后：`Failed to load node tile data` 告警 **200 次 → 0 次**，
+连续换机场 KSFO→LFPG→VHHH 后**黑纹理 0、画面可见黑块 0**，且成功瓦片数不降反增。
+
 ## 结构
 
 ```
 src/
   main.js          # 入口：统一场景编排、相机跟随、输入、主循环、对外 API
-  world.js         # three.js 渲染器/场景/相机 + geo-three 全球地形 MapView
+  world.js         # three.js 渲染器/场景/相机 + geo-three 全球地形 MapView（LOD 开关 + 瓦片并行加载补丁）
   geoUtils.js      # 经纬度<->世界坐标（含原点平移，避免浮点抖动）
+  terrainWarmup.js # 地形定向预热：沿机场四叉树链路并发建树，绕过 geo-three 逐级串行瀑布
+  runwayFlatten.js # 机场跑道压平：机场半径内高程压到标高并平滑过渡，防止起飞时飞机陷入地形
   providers/       # geo-three 自定义瓦片源
     EsriImageryProvider.js      # Esri 卫星影像（颜色贴图）
-    TerrariumHeightProvider.js  # AWS Terrarium DEM（转码为 Mapbox RGB 高程）
+    TerrariumHeightProvider.js  # AWS Terrarium DEM（转码为 Mapbox RGB 高程 + 跑道压平）
+    demHosts.js                 # DEM 多 origin 分片（S3 只有 HTTP/1.1，单 origin 仅 6 连接）
+    RetryingImageLoader.js      # 瓦片加载：真实错误重试、abort 则重排队（防止 geo-three 贴纯黑纹理）
   lighting.js      # SunCalc 太阳/月亮 -> three.js Sky/平行光/环境光/雾
   skybox.js        # 夜空增强（星空 + 月亮含相位 + 地平线暮光渐变，按夜间因子淡入）
   cityLights.js    # 城市灯光（夜间城区暖色加性发光精灵，锚定地形高度）
@@ -165,18 +253,19 @@ src/
   airports.js      # 内置 3 机场预设 + 运行时注册表(REGISTRY/makeAirport/registerAirport)
   dataSource.js    # 运行时数据层：在线搜索机场/跑道航向/航线(OpenFlights+OurAirports，含缓存与降级)
   routes.js        # 真实航班航线数据（内置 3 机场离线兜底，OpenFlights 离线生成，勿手改）
-  flightSelect.js  # 起始航班选择界面（出发机场 + 目的地航线 + 自动导航）
+  flightSelect.js  # 起始航班选择界面（默认 VHHH→HGH，离线优先渲染、在线数据到达后替换）
   aircraft.js      # 6-DOF-lite 飞行动力学（点质量+姿态，带攻角升力曲线）
   aircraftModel.js # 737 模型进共享场景：世界定位/姿态/控制面动画
   gpws.js          # 近地警告系统（沿预测航迹采样地形）
   boeing737.js     # 程序化生成的波音 737 模型（纯 Three.js 几何体）
-  terrain.js       # 自解码 Terrarium DEM 高程查询（供 AGL 数字，准、不依赖 LOD）
+  terrain.js       # 自解码 Terrarium DEM 高程查询（供 AGL 数字，准、不依赖 LOD；含跑道压平修正）
   hud.js           # HUD、夜间叠层、航班横幅、控制 UI
   minimap.js       # 右下角导航小地图（ND，北朝上，航迹/机场/航向/航班目的地）
   loadingMap.js    # 地形加载过渡层（全屏 2D 航图：大圆航线/机场/距离，地形就绪后渐隐）
 scripts/
   build_routes.mjs # 从 OpenFlights 公开数据离线生成 routes.js
   screenshot.mjs   # Puppeteer 截图验证
+  bench_startup.mjs# 首屏耗时基准（航线列表 + 地形各 LOD 层级就绪时间）
   inspect_model.*  # 737 模型多视角隔离检视
 ```
 

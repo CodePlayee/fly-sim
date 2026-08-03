@@ -6,10 +6,24 @@
  * 地形数据源（免费无 token）：AWS Terrarium DEM（高程）+ Esri World Imagery（影像）。
  */
 import * as THREE from 'three';
-import { MapView, LODFrustum } from 'geo-three';
+import { MapView, LODFrustum, MapHeightNode } from 'geo-three';
 import { EsriImageryProvider } from './providers/EsriImageryProvider.js';
 import { TerrariumHeightProvider } from './providers/TerrariumHeightProvider.js';
 import { getOrigin } from './geoUtils.js';
+
+/**
+ * geo-three 补丁：让每个地形瓦片的**影像与高程并行下载**。
+ *
+ * 原实现（MapHeightNode.initialize）是串行 await：
+ *   await this.loadData();           // Esri 影像
+ *   await this.loadHeightGeometry(); // Terrarium DEM
+ * 两者互不依赖，却要吃 **2 个串行 RTT**。而瓦片服务器只有 HTTP/1.1（单 origin 6 连接），
+ * 首屏上百张瓦片下来，这一层串行直接让总时长翻倍。改成 Promise.all 并行即可。
+ */
+MapHeightNode.prototype.initialize = async function initializeParallel() {
+  await Promise.all([this.loadData(), this.loadHeightGeometry()]);
+  this.nodeReady();
+};
 
 export function createWorld() {
   // ---- 渲染器 ----
@@ -42,7 +56,19 @@ export function createWorld() {
 
   // LOD：LODFrustum（仅细分视锥内的瓦片，把加载预算集中在可见区域，
   // 收敛快、不被四周不可见瓦片拖累）。距离按 2^(maxZoom-level) 缩放。
-  mapView.lod = new LODFrustum(160, 600);
+  const lod = new LODFrustum(160, 600);
+
+  // 首屏期间可**暂停** LOD 细分：瓦片服务器都是 HTTP/1.1（单 origin 仅 6 条连接），
+  // 而 LODFrustum 每帧会对视锥内（far=5000km，范围极大）的节点持续 subdivide，
+  // 实测首屏就能甩出 350+ 个影像请求，把 terrainWarmup 预建的**关键路径**瓦片
+  // 挤到队列后面去。首屏只需要机场脚下那一条链路，故先暂停、揭幕后再恢复。
+  let lodEnabled = true;
+  mapView.lod = {
+    updateLOD(view, camera, renderer, scene) {
+      if (lodEnabled) lod.updateLOD(view, camera, renderer, scene);
+    },
+  };
+  const setLodEnabled = (v) => { lodEnabled = !!v; };
 
   // 原点平移：geo-three 地形顶点已在 XZ 平面、Y 向上（顶点 (x,0,z)），无需旋转。
   // MapView 根缩放 = (EARTH_PERIMETER,1,EARTH_PERIMETER)，世界 X=mercator x、Z=-mercator y。
@@ -72,5 +98,5 @@ export function createWorld() {
   }
   window.addEventListener('resize', syncSize);
 
-  return { renderer, scene, camera, mapView, syncSize };
+  return { renderer, scene, camera, mapView, syncSize, setLodEnabled, imageryProvider, heightProvider };
 }
